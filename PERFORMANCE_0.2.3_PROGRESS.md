@@ -1,0 +1,10 @@
+# Performance Engineering 0.2.3
+
+- Initial HEAD: `f77503e`, branch `crossmix-trimui`, clean worktree. Functional hardware base remains installed `0.1.9-experimental` with later incremental fixes; 0.2.1/0.2.2 were not installed.
+- Cycle 1: reviewed both prior checkpoints and the active preloads/session/profile code. Native SDL MALI/WSEGL presents to PowerVR; Weston/Xwayland remain session infrastructure. Native EGL rejects the requested 1024×576, so preserve the tested 1280×720 fallback. No new physical benchmark or CPU/GPU saturation evidence.
+- Concrete candidates: repeated loader lookups in backend routing and file-open observation; whole-journal rewrite/fsync for each of ~126 particle assets. Independent changes and differential tests are in progress. Particle transformations, controls and graphics settings are unchanged.
+- Packaging audit: the 0.2.2-r2 overlay omitted `session_metrics.py`, `session_report.py`, and `failsafe_state.py` needed over a clean 0.1.9. The cumulative 0.2.3 must include these and current launcher entry/menu, without replacing user configuration.
+- Card: `/dev/sda1`, CROSSMIXOS, UUID `1B16-2B5A`, parent USB serial `1c000c660500c8d251d`; currently unmounted. Prior read-only FAT verification was denied by OS permissions. No mount, repair, write or installation in this session.
+- Runtime checkpoint: `d329bbd` preserves the existing runtime ABI while removing repeated lookup work from the particle observer and Crusty backend route. Host and ARM64-QEMU regression tests passed; no physical performance conclusion follows.
+- Final-candidate migration: `1.0.0-rc1` adds one `Minecraft Bedrock Launcher` shortcut and the approved image under `Imgs/PORTS/`. At first launch it moves only this port's nine old generated shortcuts to `backups/final-menu-cleanup/`; worlds, profiles, APKs, controls and other ports are excluded.
+- Next: build and verify the cumulative final-candidate ZIP. All physical speed/startup/audio validation remains pending, and the unverified FAT card remains untouched.

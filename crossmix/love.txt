@@ -1,0 +1,4 @@
+# Sourced only after the launcher has resolved its payload.
+export LOVE_BINARY="$controlfolder/runtimes/love_11.5/love.aarch64"
+export LOVE_GPTK=love.aarch64
+export LOVE_RUN="$GAMEDIR/crossmix/love-run.sh"

@@ -1,0 +1,1410 @@
+#!/bin/bash
+# Minecraft Bedrock Edition (mcpelauncher, EGLUT/Weston) — manual install.
+# Target: ARM handhelds on Knulli/muOS H700, ROCKNIX/Aurknix Mali devices,
+# and RK3326/R36S-class PortMaster setups via the 32-bit SDL path.
+# Reference gates: RG34XX-SP/H700 and R36S/armhf. RGDS uses its own edition.
+#
+# Place this script and the minecraftbedrock/ folder together in your ports
+# directory. muOS split installs are also supported:
+#   /roms/Ports/Minecraft Bedrock.sh + /ports/minecraftbedrock/
+
+mcpe_now_ms() {
+  local value
+  value="$(date +%s%3N 2>/dev/null || true)"
+  case "$value" in ''|*[!0-9]*) value=$(( $(date +%s 2>/dev/null || echo 0) * 1000 )) ;; esac
+  printf '%s\n' "$value"
+}
+
+MCPE_BOOT_START_MS="$(mcpe_now_ms)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PORTDIR="${MCPE_ENTRY_DIR_OVERRIDE:-$SCRIPT_DIR}"
+PAYLOAD_NAME="${MCPE_PAYLOAD_NAME_OVERRIDE:-minecraftbedrock}"
+
+HOST_MACHINE="$(uname -m 2>/dev/null || echo unknown)"
+case "$HOST_MACHINE" in
+  aarch64|arm64|armv7l|armv8l|arm*) ;;
+  *)
+    echo "This port requires an ARM Linux handheld."
+    exit 1
+    ;;
+esac
+
+# Native 32-bit firmwares need PortMaster's armhf mod path before CFW mods are
+# sourced. On 64-bit firmwares the launcher can still choose the armhf binary
+# later when it is the better fit (R36S-style low-memory path).
+case "$HOST_MACHINE" in
+  aarch64|arm64) ;;
+  *) export PORT_32BIT=Y ;;
+esac
+
+# A handheld launcher control.txt is optional for this port (the 64-bit
+# EGLUT client maps pads itself), but source it when present for ESUDO,
+# CFW_NAME, directory, pm_platform_helper — and get_controls, whose SDL
+# mapping line the 32-bit SDL client and the LOVE menu use.
+XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+PM_DIR="$(printf '\120\157\162\164\115\141\163\164\145\162')"
+# A PortMaster control.txt may legitimately redirect controlfolder at a fuller
+# install than the directory holding it. muOS ships exactly that: the entry at
+# /roms/ports/PortMaster is a stub containing control.txt and nothing else,
+# whose first act is to point controlfolder at the real install under
+# /mnt/mmc/MUOS/PortMaster. Other CFWs instead rewrite controlfolder at a bare
+# ROMs directory that has no runtime in it, and there the root we found is the
+# authoritative one. Tell the two apart by looking for payload: adopt the
+# redirect only when the target carries PortMaster content the stub lacks.
+mcpe_pm_payload_score() {
+  local root="$1" score=0 marker
+  [ -d "$root" ] || { printf '0\n'; return; }
+  for marker in runtimes libs funcs.txt device_info.txt PortMaster.sh; do
+    [ -e "$root/$marker" ] && score=$((score + 1))
+  done
+  printf '%s\n' "$score"
+}
+if [ "${MCPE_PM_INITIALIZED:-0}" != 1 ]; then
+for cf in "/opt/system/Tools/$PM_DIR" "/opt/tools/$PM_DIR" \
+          "$XDG_DATA_HOME/$PM_DIR" "/userdata/system/.local/share/$PM_DIR" \
+          "/storage/roms/ports/$PM_DIR" "/roms/ports/$PM_DIR" \
+          "/roms/tools/$PM_DIR" "/roms2/tools/$PM_DIR" \
+          "/mnt/mmc/MUOS/$PM_DIR" "/mnt/sdcard/MUOS/$PM_DIR" \
+          "/mnt/mmc/ROMS/Ports/$PM_DIR" "/mnt/sdcard/ROMS/Ports/$PM_DIR"; do
+  if [ -f "$cf/control.txt" ]; then
+    PM_CONTROL_ROOT="$cf"
+    controlfolder="$PM_CONTROL_ROOT"
+    source "$cf/control.txt" 2>/dev/null || true
+    if [ -n "${controlfolder:-}" ] && [ "$controlfolder" != "$cf" ] &&
+       [ -d "$controlfolder" ] &&
+       [ "$(mcpe_pm_payload_score "$controlfolder")" -gt "$(mcpe_pm_payload_score "$cf")" ]; then
+      PM_CONTROL_ROOT="$controlfolder"
+    fi
+    [ -f "$PM_CONTROL_ROOT/device_info.txt" ] &&
+      source "$PM_CONTROL_ROOT/device_info.txt" 2>/dev/null || true
+    [ -n "${CFW_NAME:-}" ] && [ -f "$PM_CONTROL_ROOT/mod_${CFW_NAME}.txt" ] &&
+      source "$PM_CONTROL_ROOT/mod_${CFW_NAME}.txt" 2>/dev/null || true
+    controlfolder="$PM_CONTROL_ROOT"
+    break
+  fi
+done
+fi
+export controlfolder="${controlfolder:-}"
+export PM_CONTROL_ROOT="${PM_CONTROL_ROOT:-$controlfolder}"
+export ESUDO="${ESUDO:-}"
+export CFW_NAME="${CFW_NAME:-}"
+# These are shell variables in several PortMaster control.txt versions.  Export
+# them explicitly so the architecture-specific launcher can start/stop the
+# same controller-to-keyboard helper used by the original R36S port.
+export GPTOKEYB="${GPTOKEYB:-}"
+export GPTOKEYB2="${GPTOKEYB2:-}"
+if type get_controls >/dev/null 2>&1; then
+  get_controls 2>/dev/null || true
+fi
+export sdl_controllerconfig="${sdl_controllerconfig:-}"
+
+# The sourced PortMaster files can clobber SCRIPT_DIR (seen on Knulli:
+# pick_game_dir then resolved "/minecraftbedrock"). Restore it from the
+# copy taken before sourcing.
+SCRIPT_DIR="$PORTDIR"
+
+# CFW identity is resolved once by mcpe_resolve_cfw, immediately after
+# lib/common.sh loads below. It needs CFW_NAME from the PortMaster control
+# files sourced above, so it cannot run any earlier than this point.
+
+try_game_dir() {
+  [ -f "$1/run_bedrock.sh" ] && [ -f "$1/setup_apk.sh" ] &&
+    { echo "$1"; return 0; }
+  return 1
+}
+
+pick_game_dir() {
+  local base parent pbase root
+  try_game_dir "$SCRIPT_DIR/$PAYLOAD_NAME" && return
+  [ -n "${directory:-}" ] && try_game_dir "/$directory/ports/$PAYLOAD_NAME" && return
+  try_game_dir "/mnt/mmc/ports/$PAYLOAD_NAME" && return
+  try_game_dir "/mnt/sdcard/ports/$PAYLOAD_NAME" && return
+  try_game_dir "/storage/ports/$PAYLOAD_NAME" && return
+  try_game_dir "/roms/ports/$PAYLOAD_NAME" && return
+  try_game_dir "/userdata/roms/ports/$PAYLOAD_NAME" && return
+
+  base="$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]')"
+  parent="$(dirname "$SCRIPT_DIR")"
+  pbase="$(basename "$parent" | tr '[:upper:]' '[:lower:]')"
+  if [ "$base" = "ports" ] && [ "$pbase" = "roms" ]; then
+    root="$(dirname "$parent")"
+    try_game_dir "$root/ports/$PAYLOAD_NAME" && return
+    try_game_dir "$root/Ports/$PAYLOAD_NAME" && return
+  fi
+
+  echo "$SCRIPT_DIR/$PAYLOAD_NAME"
+}
+
+GAMEDIR="${MCPE_GAMEDIR_OVERRIDE:-$(pick_game_dir)}"
+export GAMEDIR
+CONFDIR="$GAMEDIR/config"
+
+mkdir -p "$CONFDIR" "$GAMEDIR/logs" "$GAMEDIR/runtime"
+STARTUP_TIMING="$GAMEDIR/logs/startup-timing.log"
+: >"$STARTUP_TIMING" 2>/dev/null || true
+mcpe_startup_mark() {
+  local now
+  now="$(mcpe_now_ms)"
+  printf '%s ms\t%s\n' "$((now - MCPE_BOOT_START_MS))" "$1" >>"$STARTUP_TIMING" 2>/dev/null || true
+}
+# shellcheck disable=SC1091
+source "$GAMEDIR/lib/common.sh" || { echo "Missing common runtime helpers."; exit 1; }
+source "$GAMEDIR/lib/message.sh" || { echo "Missing message helpers."; exit 1; }
+# The breadcrumb is opened before anything that can hang, and the launcher log
+# is not truncated until after the capability probe, so these two files are the
+# only record a device leaves when it locks up during startup.
+mcpe_stage_begin "$GAMEDIR/logs"
+mcpe_report_begin "$GAMEDIR/logs/boot-report.txt"
+# Armed here, at the first point the report file exists, so that every exit
+# below carries the boot report into the launcher log -- including the ones
+# that happen before the game is ever reached. mcpe_report_print is
+# idempotent, so the normal path's explicit call still prints it exactly once.
+trap mcpe_report_print EXIT
+mcpe_resolve_cfw
+mcpe_stage payload
+mcpe_startup_mark "payload resolved"
+mcpe_load_edition "$GAMEDIR/edition.json" || { echo "Invalid edition manifest."; exit 1; }
+mcpe_select_utf8_locale
+# shellcheck disable=SC1091
+source "$GAMEDIR/lib/migrate_data.sh" || exit 1
+mcpe_stage migrate
+mcpe_migrate_shared_data || { echo "Shared-data migration failed without overwriting user data."; exit 1; }
+mcpe_startup_mark "shared data ready"
+python3 "$GAMEDIR/migrate_version_metadata.py" "$GAMEDIR" ||
+  echo "Legacy version metadata backfill failed; affected versions remain best effort."
+mcpe_startup_mark "version metadata ready"
+# shellcheck disable=SC1091
+source "$GAMEDIR/lib/platform.sh" || exit 1
+# shellcheck disable=SC1091
+source "$GAMEDIR/lib/failsafe.sh" || exit 1
+MCPE_PORT_VERSION="$(cat "$GAMEDIR/PORT_VERSION" 2>/dev/null || echo unknown)"
+export MCPE_PORT_VERSION
+
+# A broken interpreter makes every later stage fail for reasons that look
+# unrelated, so establish it here where the message can still be shown.
+if ! MCPE_PYTHON_FAULT="$(mcpe_python_health)"; then
+  mcpe_report_set python "broken: $(printf '%s' "$MCPE_PYTHON_FAULT" | tr '
+' ' ' | cut -c1-160)"
+  show_msg "This device cannot run Python."            "The port needs it to install and start a version."            "$(mcpe_python_health_hint "$MCPE_PYTHON_FAULT")"
+  exit 1
+fi
+mcpe_stage probe
+mcpe_apply_platform_profile "$CONFDIR/resolved_host.env" || { echo "Host capability probe failed."; exit 1; }
+mcpe_startup_mark "device profile ready"
+
+> "$GAMEDIR/logs/launcher.log" && ln -sfn "logs/launcher.log" "$GAMEDIR/log.txt" 2>/dev/null || true
+exec > >(tee -a "$GAMEDIR/logs/launcher.log") 2>&1
+cd "$GAMEDIR"
+mcpe_report_set port_dir "$PORTDIR"
+mcpe_report_set game_dir "$GAMEDIR"
+mcpe_report_set port_version "$(cat "$GAMEDIR/PORT_VERSION" 2>/dev/null || echo unknown)"
+mcpe_report_set edition "$MCPE_EDITION_ID (${MCPE_EDITION_STABILITY:-stable})"
+mcpe_report_set shared_data "$MCPE_SHARED_ROOT"
+mcpe_report_set cfw "$MCPE_CFW ($MCPE_CFW_CONFIDENCE, CFW_NAME=${CFW_NAME:-unset}, os=${MCPE_HOST_OS:-unknown})"
+mcpe_report_set cfw_support "$(mcpe_cfw_support)"
+mcpe_report_set host "arch=${MCPE_HOST_ARCH:-unknown} profile=${MCPE_HOST_PROFILE:-generic} model=${MCPE_HOST_MODEL:-unknown}"
+mcpe_report_set memory_kb "${MCPE_HOST_MEMORY_KB:-unknown}"
+mcpe_report_set graphics "backend=${MCPE_GRAPHICS_BACKEND_RESOLVED:-unknown} compositor=${MCPE_HOST_COMPOSITOR:-none}"
+mcpe_report_set panel "${MCPE_ACTIVE_WIDTH:-0}x${MCPE_ACTIVE_HEIGHT:-0} drm=${MCPE_DRM_CONNECTOR:-none}/${MCPE_DRM_MODE:-none} fb=${MCPE_FB_MODE:-none}"
+mcpe_report_set audio "backend=${MCPE_AUDIO_BACKEND_RESOLVED:-unknown} alsa=${MCPE_HAS_ALSA:-0} pulse=${MCPE_HAS_PULSE:-0} pipewire=${MCPE_HAS_PIPEWIRE:-0}"
+mcpe_report_set loaders "arm64=${MCPE_HAS_ARM64_LOADER:-0} armhf=${MCPE_HAS_ARMHF_LOADER:-0}"
+mcpe_report_set locale "${MCPE_LOCALE_RESOLVED:-unknown}"
+mcpe_report_set portmaster "control=${PM_CONTROL_ROOT:-none} mapping=${MCPE_PORTMASTER_MAPPING:-0}"
+echo "Port dir: $PORTDIR"
+echo "Game dir: $GAMEDIR"
+echo "Edition: $MCPE_EDITION_ID"
+if [ "${MCPE_EDITION_STABILITY:-stable}" = experimental ]; then
+  echo "This edition is EXPERIMENTAL and in early development."
+  echo "Expect rough edges in the second-screen companion; please report them."
+fi
+echo "Shared data: $MCPE_SHARED_ROOT"
+echo "CFW: $MCPE_CFW ($MCPE_CFW_CONFIDENCE; CFW_NAME=${CFW_NAME:-unset}) profile=${MCPE_HOST_PROFILE:-generic} backend=${MCPE_GRAPHICS_BACKEND_RESOLVED:-unknown}"
+echo "Locale: ${MCPE_LOCALE_RESOLVED:-unknown}"
+# The single most useful line in a report about a launch that never came back.
+if [ -n "${MCPE_STAGE_PREV:-}" ] && [ "$MCPE_STAGE_PREV" != done ]; then
+  echo "Previous launch did not finish; it last reached stage '$MCPE_STAGE_PREV'."
+  mcpe_report_set previous_stage "$MCPE_STAGE_PREV"
+fi
+
+# The Weston runtime (weston_pkg_0.2) is only needed by the 64-bit EGLUT path,
+# so it is resolved lazily in run_bedrock.sh's arm64 branch — a 32-bit-only
+# install on a kmsdrm device (e.g. R36S) must not fail here for a missing
+# Weston it will never use.
+export PM_DIR
+
+# On-screen messaging: fbdev CFWs (Knulli) show tty1 while a port runs;
+# under a DRM compositor (ROCKNIX/sway) there is no portable text surface,
+# so the message goes to the log and ES returns quickly.
+# SHOW_MSG_SLEEP overrides the read pause for quick progress notes.
+show_msg() {
+  echo "$*"
+  # The console rung: correct wherever fbcon is bound to the panel, which is
+  # what both reference devices do. Kept first and unchanged so those firmwares
+  # keep the exact path they were verified on.
+  local wrote_tty=0
+  if ! pidof sway >/dev/null 2>&1 && [ -w /dev/tty1 ]; then
+    {
+      clear
+      echo
+      echo "  ================ MINECRAFT BEDROCK ================"
+      echo
+      printf '  %s\n' "$@"
+      echo
+      echo "  ==================================================="
+    } > /dev/tty1 2>/dev/null && wrote_tty=1
+  fi
+  # Only count the console rung when it was actually written to. A visible
+  # console is not the same thing as a console the player can read: under a
+  # compositor the write above is skipped on purpose, and sway is then drawing
+  # over the very console /proc/consoles calls visible. Testing visibility
+  # alone returned here on ROCKNIX with nothing on screen, which silenced every
+  # message on that firmware -- the RGDS redirect, the failsafe notices and the
+  # no-version text alike. The player saw the port exit and nothing else.
+  if [ "$wrote_tty" = 1 ] && mcpe_console_is_visible; then
+    sleep "${SHOW_MSG_SLEEP:-6}"
+    return 0
+  fi
+  # The console is not rendered on this firmware, so the text above went
+  # nowhere a player can see it. Draw the same lines instead.
+  MCPE_MSG_LOVE_TXT="${MCPE_MSG_LOVE_TXT:-${MENU_LOVE_TXT:-}}" \
+    mcpe_msg_love "$@" && return 0
+  mcpe_msg_framebuffer "$@" && return 0
+  [ "$wrote_tty" = 1 ] && sleep "${SHOW_MSG_SLEEP:-6}"
+  return 0
+}
+
+# The standard build intentionally has no RGDS dual-screen payload. Its only
+# RGDS-specific behavior is this redirect into the separately versioned build.
+if [ "$MCPE_EDITION_ID" = minecraftbedrock.standard ] && [ "${MCPE_IS_RGDS:-0}" = 1 ]; then
+  export MCPE_REDIRECT_RGDS=1
+fi
+
+# version_env.py imports the APK verifier and costs about half a second on an
+# H700 microSD even when it only reads JSON. Resolve once before the menu and
+# refresh only after an action actually changes installed versions.
+MCPE_LATEST_INSTALLED=""
+refresh_installed_version() {
+  MCPE_LATEST_INSTALLED="$(
+    python3 "$GAMEDIR/version_env.py" "$GAMEDIR" --select-latest 2>/dev/null
+  )" || MCPE_LATEST_INSTALLED=""
+}
+has_installed_version() {
+  [ -n "$MCPE_LATEST_INSTALLED" ] &&
+    [ -d "$GAMEDIR/versions/$MCPE_LATEST_INSTALLED" ]
+}
+refresh_installed_version
+mcpe_startup_mark "installed version selected"
+
+import_legacy_r36s_versions() {
+  has_installed_version && return 0
+  local legacy v imported
+  imported=0
+  for legacy in \
+    "$PORTDIR/mcpe_launcher" \
+    "$(dirname "$GAMEDIR")/mcpe_launcher" \
+    "/roms/ports/mcpe_launcher" \
+    "/storage/roms/ports/mcpe_launcher" \
+    "/roms2/ports/mcpe_launcher" \
+    "/storage/roms2/ports/mcpe_launcher"
+  do
+    [ -d "$legacy/versions" ] || continue
+    show_msg "Found legacy R36S mcpe_launcher versions." \
+             "Importing them into minecraftbedrock..."
+    for v in "$legacy/versions"/*; do
+      [ -d "$v" ] || continue
+      [ -d "$GAMEDIR/versions/$(basename "$v")" ] && continue
+      cp -r "$v" "$GAMEDIR/versions/"
+      imported=1
+    done
+    if [ "$imported" = 1 ]; then
+      refresh_installed_version
+      show_msg "Legacy versions imported."
+    fi
+    return 0
+  done
+}
+
+import_legacy_r36s_versions
+
+# --- Launcher menu availability ------------------------------------------------
+# The LOVE menu (version picker, APK installer, settings) runs wherever
+# PortMaster's love runtime is installed: nested under sway (ROCKNIX), or
+# straight on the CFW's SDL video stack (Knulli/muOS fbdev-mali). If the
+# runtime is missing or the menu crashes, everything falls back to the old
+# auto behavior. Disable with MCPE_MENU=0; custom shortcuts that pin
+# MCVER_OVERRIDE skip it too.
+love_txt_candidates() { # every place PortMaster is known to keep the runtime
+  # PM_CONTROL_ROOT and controlfolder are the same directory unless a stub
+  # control.txt redirected one of them, so the list is de-duplicated: it is
+  # printed into the boot report, and a repeated path there reads as a bug.
+  local seen="" candidate
+  for candidate in "${MCPE_LOVE_TXT_OVERRIDE:-/nonexistent}" \
+                   "$PM_CONTROL_ROOT/runtimes/love_11.5/love.txt" \
+                   "$controlfolder/runtimes/love_11.5/love.txt" \
+                   "$controlfolder/libs/love_11.5/love.txt" \
+                   "$controlfolder/runtimes/love/love.txt" \
+                   "/userdata/system/.local/share/$PM_DIR/runtimes/love_11.5/love.txt"; do
+    case "$seen" in *"|$candidate|"*) continue ;; esac
+    seen="$seen|$candidate|"
+    printf '%s\n' "$candidate"
+  done
+}
+find_love_txt() {
+  local lt
+  while IFS= read -r lt; do
+    [ -n "$lt" ] && [ -f "$lt" ] && { printf '%s\n' "$lt"; return 0; }
+  done < <(love_txt_candidates)
+  return 1
+}
+MENU_LOVE_TXT=""
+MENU_WANTED=0
+# Why the menu is or is not available, recorded in the boot report. Without it a
+# device whose PortMaster carries no LOVE runtime falls through to the legacy
+# path, and the only thing the player is told is that no Minecraft version is
+# installed -- true, and not the reason they never saw a menu (issue #10).
+MENU_UNAVAILABLE_REASON=""
+if [ "${MCPE_MENU:-auto}" = 0 ]; then
+  MENU_UNAVAILABLE_REASON="switched off with MCPE_MENU=0"
+elif [ -n "${MCVER_OVERRIDE:-}" ]; then
+  MENU_UNAVAILABLE_REASON="skipped because MCVER_OVERRIDE pins a version"
+elif [ ! -f "$GAMEDIR/menu/main.lua" ]; then
+  MENU_UNAVAILABLE_REASON="this payload has no menu/main.lua"
+else
+  MENU_WANTED=1
+  MENU_LOVE_TXT="$(find_love_txt)" || MENU_LOVE_TXT=""
+  [ -n "$MENU_LOVE_TXT" ] ||
+    MENU_UNAVAILABLE_REASON="PortMaster's LOVE 11.5 runtime was not found"
+fi
+if [ -n "$MENU_LOVE_TXT" ]; then
+  mcpe_report_set menu "available love=$MENU_LOVE_TXT"
+else
+  mcpe_report_set menu "unavailable: $MENU_UNAVAILABLE_REASON"
+  [ "$MENU_WANTED" = 1 ] &&
+    mcpe_report_set menu_searched "$(love_txt_candidates | tr '\n' ' ')"
+fi
+if [ "$MENU_WANTED" = 1 ] && [ -z "$MENU_LOVE_TXT" ] &&
+   [ "${MCPE_MENU:-auto}" = 1 ]; then
+  show_msg "Minecraft launcher menu unavailable." \
+           "PortMaster's LOVE 11.5 runtime was not found." \
+           "Update PortMaster, or set MCPE_MENU=0 to use legacy autoplay."
+  exit 2
+fi
+
+# --- APK extraction --------------------------------------------------------------
+# With the menu available, installs are user-driven from the Install screen, so
+# a forgotten APK in apk/ no longer breaks every launch. Menu-less devices keep
+# the old extract-on-launch behavior; a failure there is only fatal when
+# nothing is installed yet.
+# Extraction takes minutes with nothing on screen, which reads as a freeze.
+# apkmeta.py publishes "<percent> <message>" to the progress file; redraw it
+# until the installer exits.
+draw_install_progress() { # pid progress_file
+  local pid="$1" file="$2" line pct msg bar width filled i
+  local last_pct=0 last_msg="preparing"
+  if [ -n "${LOVE_RUN:-}" ] && [ -d "$GAMEDIR/downloader/progress-ui" ] &&
+     ! pidof sway >/dev/null 2>&1; then
+    SDL_AUDIODRIVER=dummy MCPE_PROGRESS_FILE="$file" MCPE_PROGRESS_KIND=install \
+      $LOVE_RUN "$GAMEDIR/downloader/progress-ui" \
+      >>"$GAMEDIR/logs/progress-ui.log" 2>&1 &
+    local progress_ui_pid=$!
+    while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+    kill "$progress_ui_pid" 2>/dev/null || true
+    wait "$progress_ui_pid" 2>/dev/null || true
+    return 0
+  fi
+  pidof sway >/dev/null 2>&1 && return 0
+  [ -w /dev/tty1 ] || return 0
+  width=34
+  while kill -0 "$pid" 2>/dev/null; do
+    line="$(head -n 1 "$file" 2>/dev/null)"
+    pct="${line%% *}"
+    msg="${line#* }"
+    # An unreadable sample keeps the previous reading rather than snapping the
+    # bar back to zero.
+    case "$pct" in ''|*[!0-9]*) pct="$last_pct"; msg="$last_msg" ;; esac
+    [ -n "$msg" ] && [ "$msg" != "$line" ] || msg="$last_msg"
+    last_pct="$pct"
+    last_msg="$msg"
+    filled=$(( pct * width / 100 ))
+    bar=""
+    i=0
+    while [ "$i" -lt "$width" ]; do
+      if [ "$i" -lt "$filled" ]; then bar="$bar#"; else bar="$bar."; fi
+      i=$(( i + 1 ))
+    done
+    {
+      clear
+      echo
+      echo "  ================ MINECRAFT BEDROCK ================"
+      echo
+      echo "  Installing game files - do not turn off"
+      echo
+      printf '  [%s] %3d%%\n' "$bar" "$pct"
+      echo
+      printf '  %s\n' "$msg"
+      echo
+      echo "  ==================================================="
+    } > /dev/tty1 2>/dev/null
+    sleep 1
+  done
+}
+
+draw_downloader_progress_love() { # downloader_pid progress_file ack_file
+  local downloader_pid="$1" file="$2" ack="$3"
+  local ui_pid="" line mode failures=0
+  [ -n "${LOVE_RUN:-}" ] || return 1
+  [ -d "$GAMEDIR/downloader/progress-ui" ] || return 1
+  pidof sway >/dev/null 2>&1 && return 1
+  rm -f "$ack"
+  while kill -0 "$downloader_pid" 2>/dev/null; do
+    if [ -n "$ui_pid" ] && kill -0 "$ui_pid" 2>/dev/null; then
+      sleep 0.2
+      continue
+    fi
+    if [ -n "$ui_pid" ]; then
+      wait "$ui_pid" 2>/dev/null || true
+      ui_pid=""
+    fi
+    line="$(head -n 1 "$file" 2>/dev/null)"
+    mode="$(printf '%s' "$line" | cut -d'|' -f2)"
+    if [ "$mode" = interactive ]; then
+      : >"$ack"
+      while kill -0 "$downloader_pid" 2>/dev/null; do
+        line="$(head -n 1 "$file" 2>/dev/null)"
+        mode="$(printf '%s' "$line" | cut -d'|' -f2)"
+        [ "$mode" = interactive ] || break
+        sleep 0.2
+      done
+      failures=0
+      continue
+    fi
+    if [ "$failures" -ge 3 ]; then
+      # Keep servicing the interactive handshake even if LOVE cannot draw.
+      sleep 0.5
+      continue
+    fi
+    SDL_AUDIODRIVER=dummy MCPE_PROGRESS_FILE="$file" MCPE_PROGRESS_KIND=download \
+      MCPE_PROGRESS_EXIT_INTERACTIVE=1 \
+      $LOVE_RUN "$GAMEDIR/downloader/progress-ui" \
+      >>"$GAMEDIR/logs/progress-ui.log" 2>&1 &
+    ui_pid=$!
+    failures=$((failures + 1))
+    sleep 0.2
+  done
+  if [ -n "$ui_pid" ]; then
+    kill "$ui_pid" 2>/dev/null || true
+    wait "$ui_pid" 2>/dev/null || true
+  fi
+  rm -f "$ack"
+  return 0
+}
+
+# The optional downloader has a long first-use preparation phase before its
+# Weston/Qt Google window exists. Knulli otherwise leaves LOVE's confirmation
+# frame on screen, which looks frozen. Show real milestones on tty1, but stop
+# writing while the interactive Google window owns the framebuffer.
+draw_downloader_progress() { # pid progress_file [interactive_ack]
+  local pid="$1" file="$2" ack="${3:-}"
+  local line pct mode heading detail bar width filled i
+  local last_pct=1 last_mode=active last_heading="Starting Google Play downloader"
+  local last_detail="Checking optional sign-in components."
+  if [ -n "$ack" ] && draw_downloader_progress_love "$pid" "$file" "$ack"; then
+    return 0
+  fi
+  pidof sway >/dev/null 2>&1 && return 0
+  [ -w /dev/tty1 ] || return 0
+  width=34
+  while kill -0 "$pid" 2>/dev/null; do
+    line="$(head -n 1 "$file" 2>/dev/null)"
+    IFS='|' read -r pct mode heading detail <<<"$line"
+    case "$pct" in ''|*[!0-9]*)
+      pct="$last_pct"; mode="$last_mode"; heading="$last_heading"; detail="$last_detail"
+      ;;
+    esac
+    case "$mode" in active|interactive) ;; *) mode="$last_mode" ;; esac
+    [ -n "$heading" ] || heading="$last_heading"
+    [ -n "$detail" ] || detail="$last_detail"
+    last_pct="$pct"; last_mode="$mode"; last_heading="$heading"; last_detail="$detail"
+    if [ "$mode" = interactive ]; then
+      sleep 1
+      continue
+    fi
+    filled=$(( pct * width / 100 ))
+    bar=""; i=0
+    while [ "$i" -lt "$width" ]; do
+      if [ "$i" -lt "$filled" ]; then bar="$bar#"; else bar="$bar."; fi
+      i=$(( i + 1 ))
+    done
+    {
+      clear
+      echo
+      echo "  ============= GOOGLE PLAY APK DOWNLOADER ============="
+      echo
+      printf '  %s\n' "$heading"
+      echo
+      printf '  [%s] %3d%%\n' "$bar" "$pct"
+      echo
+      printf '  %s\n' "$detail"
+      echo
+      echo "  First use is slower because the private browser is installed once."
+      echo "  Do not turn off the device."
+      echo
+      echo "  ========================================================"
+    } >/dev/tty1 2>/dev/null
+    sleep 1
+  done
+}
+
+run_apk_setup() { # [apk paths...]
+  local progress="$GAMEDIR/install_progress.txt" setup_pid setup_rc
+  : > "$progress" 2>/dev/null || true
+  SHOW_MSG_SLEEP=1 show_msg "Found APK - extracting game files." \
+                            "This takes a few minutes, please wait..."
+  MCPE_PROGRESS_FILE="$progress" MCPE_ALLOW_UNTESTED="${MCPE_ALLOW_UNTESTED:-0}" \
+    bash "$GAMEDIR/setup_apk.sh" "$@" &
+  setup_pid=$!
+  draw_install_progress "$setup_pid" "$progress"
+  wait "$setup_pid"
+  setup_rc=$?
+  rm -f "$progress"
+  if [ "$setup_rc" -eq 0 ]; then
+    refresh_installed_version
+    show_msg "Game installed!" "You can now delete the APK from the apk folder."
+    return 0
+  fi
+  if [ -s "$GAMEDIR/setup_error.txt" ]; then
+    mapfile -t err_lines < "$GAMEDIR/setup_error.txt"
+    show_msg "APK setup failed:" "${err_lines[@]}"
+  else
+    show_msg "APK extraction FAILED." \
+             "See log.txt in the minecraftbedrock folder."
+  fi
+  return 1
+}
+
+has_installer_input() {
+  find "$GAMEDIR/apk" -maxdepth 1 -type f \
+    \( -iname '*.apk' -o -iname '*.apks' -o -iname '*.apkm' \
+       -o -iname '*.xapk' -o -iname '*.zip' \) -print -quit 2>/dev/null |
+    grep -q .
+}
+
+if has_installer_input; then
+  if ! has_installed_version; then
+    run_apk_setup || exit 1
+  elif [ -z "$MENU_LOVE_TXT" ] && [ -z "${MCVER_OVERRIDE:-}" ]; then
+    run_apk_setup || echo "Continuing with the already-installed versions."
+  fi
+fi
+
+if ! has_installed_version && [ -z "$MENU_LOVE_TXT" ]; then
+  # Lead with the runtime when that is what actually stopped the menu. A player
+  # who put an APK in the right place and still reads "no version installed" has
+  # no way to guess that PortMaster is the thing to fix.
+  no_version_lines=()
+  if [ "$MENU_WANTED" = 1 ]; then
+    no_version_lines+=("The launcher menu could not start:" \
+                       "PortMaster's LOVE 11.5 runtime was not found," \
+                       "so Install APK and Versions are unavailable." \
+                       "Update PortMaster on this device, then try again." \
+                       "")
+  fi
+  no_version_lines+=("No Minecraft version installed." \
+                     "Copy your own APK/APKM/APKS/XAPK (arm64, or arm32 for RK3326" \
+                     "devices like the R36S) into:" \
+                     "ports/minecraftbedrock-data/apk/" \
+                     "then launch this port again.")
+  show_msg "${no_version_lines[@]}"
+  exit 1
+fi
+
+latest_installed_version() {
+  local selected candidate
+  if has_installed_version; then
+    printf '%s\n' "$MCPE_LATEST_INSTALLED"
+    return 0
+  fi
+  selected="$(python3 "$GAMEDIR/version_env.py" "$GAMEDIR" --select-latest 2>/dev/null)" &&
+    [ -n "$selected" ] && { printf '%s\n' "$selected"; return 0; }
+  # Compatibility fallback for an old payload that predates metadata.  The
+  # normal path above always prefers a validated version.json and therefore
+  # cannot choose an alphabetically-late, misnamed extraction over it.
+  if sort -V </dev/null >/dev/null 2>&1; then
+    for candidate in "$GAMEDIR/versions"/*; do
+      [ -d "$candidate" ] && printf '%s\n' "$(basename "$candidate")"
+    done | sort -V | tail -1
+  else
+    for candidate in "$GAMEDIR/versions"/*; do
+      [ -d "$candidate" ] && printf '%s\n' "$(basename "$candidate")"
+    done | sort | tail -1
+  fi
+}
+
+# --- Frontend handling for the menu ---------------------------------------------
+# muOS owns its framebuffer outside a launched port, so its frontend needs a
+# local handoff. Knulli already pauses ES input/display through emulatorlauncher
+# while a port runs; trying to stop its service from inside that child blocks
+# for 20 seconds and leaves the ES wrapper alive beside the port.
+ES_INIT=/etc/init.d/S31emulationstation
+MENU_STOPPED_ES=0
+MENU_STOPPED_MUOS=0
+menu_stop_frontend() {
+  # PortMaster/CFW launch wrappers normally own frontend suspension. The old
+  # internal kill/restart path is retained only as an explicit compatibility
+  # escape hatch for direct/manual launches.
+  [ "${MCPE_MANAGE_FRONTEND:-0}" = 1 ] || return
+  pidof sway >/dev/null 2>&1 && return
+  if mcpe_is_cfw muos; then
+    if pidof frontend.sh >/dev/null 2>&1 || pidof muxlaunch >/dev/null 2>&1; then
+      MENU_STOPPED_MUOS=1
+      $ESUDO killall -q frontend.sh muxlaunch 2>/dev/null || true
+      sleep 1
+    fi
+    return
+  fi
+  mcpe_is_knulli && return
+  [ -x "$ES_INIT" ] || return
+  pidof emulationstation >/dev/null 2>&1 || return
+  MENU_STOPPED_ES=1
+  $ESUDO "$ES_INIT" stop
+}
+menu_restore_frontend() {
+  if [ -n "${MCPE_MENU_HANDOFF_PID:-}" ]; then
+    kill "$MCPE_MENU_HANDOFF_PID" 2>/dev/null || true
+    wait "$MCPE_MENU_HANDOFF_PID" 2>/dev/null || true
+    unset MCPE_MENU_HANDOFF_PID
+  fi
+  if [ "$MENU_STOPPED_MUOS" = 1 ]; then
+    MENU_STOPPED_MUOS=0
+    (
+      unset GAMEDIR MCVER_OVERRIDE MCPE_DATA_ROOT_OVERRIDE MCPE_IS_MUOS MCPE_CFW
+      if [ -x /opt/muos/script/mux/frontend.sh ]; then
+        setsid /opt/muos/script/mux/frontend.sh launcher </dev/null >/dev/null 2>&1 &
+      elif command -v frontend.sh >/dev/null 2>&1; then
+        setsid frontend.sh launcher </dev/null >/dev/null 2>&1 &
+      fi
+    )
+    return
+  fi
+  [ "$MENU_STOPPED_ES" = 1 ] || return
+  MENU_STOPPED_ES=0
+  (
+    unset GAMEDIR MCVER_OVERRIDE MCPE_DATA_ROOT_OVERRIDE
+    setsid $ESUDO "$ES_INIT" start </dev/null >/dev/null 2>&1
+  )
+}
+trap 'menu_restore_frontend; mcpe_report_print' EXIT
+
+# --- Launcher menu ---------------------------------------------------------------
+# Loop: install/delete actions return to the menu; play/exit leave it.
+MCPE_MENU_STATUS=""
+
+valid_plain_name() { # no path tricks in names coming back from the menu
+  case "$1" in ""|.|..|.*|*/*|*\\*) return 1 ;; esac
+  return 0
+}
+
+menu_do_install() {
+  local names=() n
+  if [ -f "$CONFDIR/install_request.txt" ]; then
+    while IFS= read -r n; do
+      valid_plain_name "$n" && [ -f "$GAMEDIR/apk/$n" ] &&
+        names+=("$GAMEDIR/apk/$n")
+    done < "$CONFDIR/install_request.txt"
+    rm -f "$CONFDIR/install_request.txt"
+  fi
+  if run_apk_setup "${names[@]}"; then
+    MCPE_MENU_STATUS="Installed OK - you can delete the APK (X)"
+  else
+    MCPE_MENU_STATUS="Install failed - see log.txt"
+  fi
+}
+
+refresh_downloader_menu_state() {
+  export MCPE_DOWNLOADER_SUPPORTED=0 MCPE_DOWNLOADER_SESSION=0 MCPE_DOWNLOADER_RUNTIME=0
+  # Keep this firmware list identical to is_supported() in downloader/run.sh.
+  # They are separate gates -- this one only decides whether the menu tile is
+  # selectable, run.sh decides whether the download may proceed -- and when they
+  # disagreed the tile stayed greyed out no matter what run.sh thought.
+  # tests/test_cfw_contracts.py asserts the two lists match.
+  if [ "${MCPE_HOST_ARCH:-}" = aarch64 ] && [ "${MCPE_HOST_PROFILE:-}" = h700 ] &&
+     mcpe_is_cfw knulli batocera muos; then
+    export MCPE_DOWNLOADER_SUPPORTED=1
+  fi
+  [ -s "$MCPE_SHARED_ROOT/downloader/playdl.conf" ] &&
+    [ -s "$MCPE_SHARED_ROOT/downloader/token_cache.conf" ] &&
+    export MCPE_DOWNLOADER_SESSION=1
+  if [ -x "$MCPE_SHARED_ROOT/downloader/runtime/root/usr/bin/mcpelauncher-ui-qt" ] ||
+     [ -x /userdata/roms/ports/.mcpe_appimage64/squashfs-root/usr/bin/mcpelauncher-ui-qt ]; then
+    export MCPE_DOWNLOADER_RUNTIME=1
+  fi
+}
+
+apk_quick_state() {
+  local path lower row rows=""
+  for path in "$GAMEDIR/apk/"*; do
+    [ -f "$path" ] || continue
+    lower="${path,,}"
+    case "$lower" in *.apk|*.apks|*.apkm|*.xapk|*.zip) ;; *) continue ;; esac
+    row="$(stat -c '%n|%s|%Y' "$path" 2>/dev/null)" || return 1
+    rows+="$row"$'\n'
+  done
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$rows" | sha256sum | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$rows" | openssl dgst -sha256 | sed 's/^.*= //'
+  else
+    return 1
+  fi
+}
+
+refresh_apk_groups() {
+  local quick cached="" marker="$CONFDIR/apk-groups/.quick-input-state"
+  quick="$(apk_quick_state)" || quick=""
+  [ -f "$marker" ] && read -r cached <"$marker"
+  if [ -n "$quick" ] && [ "$quick" = "$cached" ] &&
+     [ -f "$CONFDIR/apk-groups/index.tsv" ]; then
+    return 0
+  fi
+  python3 "$GAMEDIR/apk_groups.py" "$GAMEDIR/apk" "$CONFDIR/apk-groups" \
+    2>>"$GAMEDIR/logs/launcher.log" || return 1
+  quick="$(apk_quick_state)" || quick=""
+  [ -n "$quick" ] && printf '%s\n' "$quick" >"$marker" 2>/dev/null || true
+}
+
+menu_do_download() { # version-code[:arm64|armhf]
+  local request="$1" code abi result="$CONFDIR/downloader-result.txt"
+  local progress="$GAMEDIR/downloader_progress.txt" downloader_pid downloader_rc
+  local progress_ack=""
+  local names=() n
+  case "$request" in
+    *:*) code="${request%%:*}"; abi="${request#*:}" ;;
+    *) code="$request"; abi=arm64 ;;
+  esac
+  case "$code" in ''|*[!0-9]*) MCPE_MENU_STATUS="Invalid download choice"; return ;; esac
+  case "$abi" in arm64|armhf) ;; *) MCPE_MENU_STATUS="Invalid download architecture"; return ;; esac
+  if ! awk -F '\t' -v code="$code" -v abi="$abi" \
+      '$1 == code && $2 == abi { found=1 } END { exit(found ? 0 : 1) }' \
+      "$GAMEDIR/downloader/version_catalog.tsv" 2>/dev/null; then
+    MCPE_MENU_STATUS="Version is not in the downloadable catalog"
+    return
+  fi
+  if [ "${MCPE_DOWNLOADER_SUPPORTED:-0}" != 1 ]; then
+    MCPE_MENU_STATUS="Downloader prototype requires an H700 device on Knulli/Batocera/muOS"
+    return
+  fi
+  SHOW_MSG_SLEEP=1 show_msg "Opening the optional Google Play downloader..." \
+                            "Passwords stay inside Google's sign-in page."
+  printf '1|active|Starting Google Play downloader|Checking optional sign-in components.\n' \
+    >"$progress" 2>/dev/null || true
+  if [ -n "${LOVE_RUN:-}" ] && [ -d "$GAMEDIR/downloader/progress-ui" ] &&
+     ! pidof sway >/dev/null 2>&1; then
+    progress_ack="$GAMEDIR/config/downloader-interactive.ack"
+    rm -f "$progress_ack"
+  fi
+  MCPE_DOWNLOADER_STATE="$MCPE_SHARED_ROOT/downloader" \
+  MCPE_DOWNLOADER_RESULT="$result" MCPE_DOWNLOADER_PROGRESS="$progress" \
+  MCPE_DOWNLOADER_INTERACTIVE_ACK="$progress_ack" \
+    bash "$GAMEDIR/downloader/run.sh" download "$code" "$abi" &
+  downloader_pid=$!
+  draw_downloader_progress "$downloader_pid" "$progress" "$progress_ack"
+  wait "$downloader_pid"
+  downloader_rc=$?
+  rm -f "$progress"
+  if [ "$downloader_rc" -ne 0 ]; then
+    MCPE_MENU_STATUS="Download failed or cancelled - see logs/downloader.log"
+    return
+  fi
+  if [ -f "$result" ]; then
+    while IFS= read -r n; do
+      valid_plain_name "$n" && [ -f "$GAMEDIR/apk/$n" ] && names+=("$GAMEDIR/apk/$n")
+    done <"$result"
+    rm -f "$result"
+  fi
+  if [ "${#names[@]}" -eq 0 ]; then
+    MCPE_MENU_STATUS="Download finished but produced no validated APK set"
+  elif MCPE_ALLOW_UNTESTED=1 run_apk_setup "${names[@]}"; then
+    MCPE_MENU_STATUS="Downloaded, validated and installed $abi build from Google Play"
+  else
+    MCPE_MENU_STATUS="APK downloaded; automatic install failed - see log.txt"
+  fi
+}
+
+run_launcher_menu() {
+  [ -n "$MENU_LOVE_TXT" ] || return 1
+  # shellcheck disable=SC1090
+  source "$MENU_LOVE_TXT" 2>/dev/null || return 1
+  [ -n "${LOVE_RUN:-}" ] || return 1
+  if command -v pm_platform_helper >/dev/null 2>&1 &&
+     [ -n "${LOVE_BINARY:-}" ]; then
+    pm_platform_helper "$LOVE_BINARY" >/dev/null 2>&1 || true
+  fi
+  mcpe_startup_mark "menu runtime prepared"
+  export MCPE_GAMEDIR="$GAMEDIR"
+  export MCPE_MENU_EXIT_ON_PLAY=0
+  # On Knulli/fbdev the last presented frame remains visible after LOVE exits.
+  # Reap the menu before Weston starts so two Mali surfaces can never swap to
+  # the panel at the same time. Composited CFWs retain the live handoff path.
+  mcpe_is_knulli && export MCPE_MENU_EXIT_ON_PLAY=1
+  local action arg love_status love_pid menu_gptk_pid menu_controller_file menu_controller_config
+  local menu_ready_watch_pid
+  menu_controller_file="${SDL_GAMECONTROLLERCONFIG_FILE:-/tmp/gamecontrollerdb.txt}"
+  menu_controller_config="${sdl_controllerconfig:-}"
+  # LOVE consumes SDL raw indices, while mcpelauncher's linux-gamepad backend
+  # consumes a different evdev-derived index space. Never feed the game map to
+  # LOVE: it makes the face buttons and shoulders appear unrelated.
+  if [ "${MCPE_HOST_PROFILE:-}" = h700 ] &&
+     [ -s "$GAMEDIR/controls/rg34xxsp.sdl.gamecontrollerdb.txt" ]; then
+    menu_controller_file="$GAMEDIR/controls/rg34xxsp.sdl.gamecontrollerdb.txt"
+    menu_controller_config="$(awk 'NF && $1 !~ /^#/' "$menu_controller_file")"
+  fi
+  while :; do
+    # APK inspection can be expensive for large split sets. Keep the frontend
+    # visible until the cached inventory is ready, then hand display/input to
+    # LOVE immediately before it draws.
+    refresh_apk_groups || true
+    mcpe_startup_mark "APK inventory ready"
+    refresh_downloader_menu_state
+    menu_stop_frontend
+    : > "$CONFDIR/menu_action.txt"
+    rm -f "$CONFDIR/menu_first_frame.txt"
+    export MCPE_MENU_STATUS
+    menu_gptk_pid=""
+    # LOVE receives mapped SDL gamepad events directly on H700. Running a
+    # keyboard bridge at the same time races the same button through two input
+    # paths (for example printed A as both select and Escape), so use the
+    # bridge only on older profiles that actually need keyboard emulation.
+    if [ -n "${GPTOKEYB:-}" ] && [ "${MCPE_HOST_PROFILE:-}" != h700 ] &&
+       ! mcpe_is_cfw crossmix; then
+      # gptokeyb attaches by process name. Take it from the LOVE runtime this
+      # launch actually resolved rather than assembling it from DEVICE_ARCH,
+      # which is unset on several CFWs -- on armhf dArkOS that produced
+      # "love.aarch64", a process that never exists, so menu input was never
+      # mapped (visible in the issue #1 log as the helper being killed).
+      menu_gptk_target="$(basename "${LOVE_BINARY:-}" 2>/dev/null)"
+      [ -n "$menu_gptk_target" ] || menu_gptk_target="love.${DEVICE_ARCH:-aarch64}"
+      SDL_GAMECONTROLLERCONFIG="$menu_controller_config" \
+      SDL_GAMECONTROLLERCONFIG_FILE="$menu_controller_file" \
+        $GPTOKEYB "$menu_gptk_target" >/dev/null 2>&1 &
+      menu_gptk_pid=$!
+    fi
+    SDL_AUDIODRIVER=dummy \
+      SDL_GAMECONTROLLERCONFIG="$menu_controller_config" \
+      SDL_GAMECONTROLLERCONFIG_FILE="$menu_controller_file" \
+      $LOVE_RUN "$GAMEDIR/menu" &
+    love_pid=$!
+    mcpe_startup_mark "LOVE process started"
+    (
+      while kill -0 "$love_pid" 2>/dev/null; do
+        if [ -s "$CONFDIR/menu_first_frame.txt" ]; then
+          mcpe_startup_mark "menu first frame"
+          exit 0
+        fi
+        sleep 0.02
+      done
+    ) &
+    menu_ready_watch_pid=$!
+    action=""
+    # Normal actions write the protocol file and exit. Play writes it but
+    # deliberately keeps the fullscreen Launching screen alive for handoff.
+    while kill -0 "$love_pid" 2>/dev/null; do
+      action="$(sed -n 1p "$CONFDIR/menu_action.txt" 2>/dev/null)"
+      [ -n "$action" ] && break
+      sleep 0.05
+    done
+    if [ "$action" = play ] && kill -0 "$love_pid" 2>/dev/null; then
+      if [ "${MCPE_MENU_EXIT_ON_PLAY:-0}" = 1 ]; then
+        wait "$love_pid"
+        love_status=$?
+      else
+        export MCPE_MENU_HANDOFF_PID="$love_pid"
+        love_status=0
+      fi
+    else
+      wait "$love_pid"
+      love_status=$?
+    fi
+    if [ -n "$menu_gptk_pid" ]; then
+      kill "$menu_gptk_pid" 2>/dev/null || true
+      wait "$menu_gptk_pid" 2>/dev/null || true
+    fi
+    kill "$menu_ready_watch_pid" 2>/dev/null || true
+    wait "$menu_ready_watch_pid" 2>/dev/null || true
+    [ -n "$action" ] || action="$(sed -n 1p "$CONFDIR/menu_action.txt" 2>/dev/null)"
+    arg="$(sed -n 2p "$CONFDIR/menu_action.txt" 2>/dev/null)"
+    menu_profile="$(sed -n 3p "$CONFDIR/menu_action.txt" 2>/dev/null)"
+    case "$action" in
+      play)
+        valid_plain_name "$arg" && [ -d "$GAMEDIR/versions/$arg" ] &&
+          export MCVER_OVERRIDE="$arg"
+        case "$menu_profile" in
+          ORIGINAL|NO_PARTICLES|PERFORMANCE) export MCPE_PERF_PROFILE="$menu_profile" ;;
+          *) : ;; # Old menu builds retain the existing environment/config default.
+        esac
+        case "${MCPE_PERF_PROFILE:-}" in
+          ORIGINAL|NO_PARTICLES|PERFORMANCE) mcpe_report_set launcher_profile "$MCPE_PERF_PROFILE" ;;
+          *) mcpe_report_set launcher_profile "config-default" ;;
+        esac
+        return 0
+        ;;
+      install)
+        menu_do_install
+        ;;
+      install_untested)
+        # The menu already put the risk to the user and they said yes.
+        MCPE_ALLOW_UNTESTED=1 menu_do_install
+        ;;
+      download_apk)
+        menu_do_download "$arg"
+        ;;
+      downloader_signout)
+        if MCPE_DOWNLOADER_STATE="$MCPE_SHARED_ROOT/downloader" \
+             bash "$GAMEDIR/downloader/run.sh" signout; then
+          MCPE_MENU_STATUS="Saved Google session removed from this device"
+        else
+          MCPE_MENU_STATUS="Could not remove the saved Google session"
+        fi
+        ;;
+      downloader_remove)
+        if MCPE_DOWNLOADER_STATE="$MCPE_SHARED_ROOT/downloader" \
+             bash "$GAMEDIR/downloader/run.sh" remove; then
+          MCPE_MENU_STATUS="Optional downloader runtime removed; APKs kept"
+        else
+          MCPE_MENU_STATUS="Could not remove the optional downloader runtime"
+        fi
+        ;;
+      delete)
+        if valid_plain_name "$arg" && [ -d "$GAMEDIR/versions/$arg" ]; then
+          rm -rf "$GAMEDIR/versions/$arg"
+          refresh_installed_version
+          MCPE_MENU_STATUS="Deleted version $arg"
+        fi
+        ;;
+      delete_apk)
+        if valid_plain_name "$arg" && [ -f "$GAMEDIR/apk/$arg" ]; then
+          rm -f "$GAMEDIR/apk/$arg"
+          MCPE_MENU_STATUS="Deleted $arg"
+        fi
+        ;;
+      delete_apk_group)
+        if valid_plain_name "$arg" && [ -f "$CONFDIR/apk-groups/$arg.txt" ]; then
+          deleted=0
+          while IFS= read -r apk_name; do
+            if valid_plain_name "$apk_name" && [ -f "$GAMEDIR/apk/$apk_name" ]; then
+              rm -f "$GAMEDIR/apk/$apk_name"
+              deleted=$((deleted + 1))
+            fi
+          done <"$CONFDIR/apk-groups/$arg.txt"
+          MCPE_MENU_STATUS="Deleted $deleted APK file(s)"
+        fi
+        ;;
+      backup_create)
+        mkdir -p "$GAMEDIR/backups"
+        bk="backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+        SHOW_MSG_SLEEP=1 show_msg "Creating backup..." \
+                                  "(worlds, settings, profiles)"
+        backup_args=(-C "$MCPE_SHARED_ROOT" profiles)
+        [ -f "$GAMEDIR/config/settings.cfg" ] && \
+          backup_args+=(-C "$GAMEDIR" config/settings.cfg)
+        if tar czf "$GAMEDIR/backups/$bk.part" "${backup_args[@]}" 2>/dev/null &&
+           mv "$GAMEDIR/backups/$bk.part" "$GAMEDIR/backups/$bk"; then
+          MCPE_MENU_STATUS="Backup created ($(du -h "$GAMEDIR/backups/$bk" 2>/dev/null | cut -f1))"
+        else
+          rm -f "$GAMEDIR/backups/$bk.part"
+          MCPE_MENU_STATUS="Backup FAILED - check free space"
+        fi
+        ;;
+      backup_restore)
+        if valid_plain_name "$arg" && [ -f "$GAMEDIR/backups/$arg" ]; then
+          SHOW_MSG_SLEEP=1 show_msg "Restoring backup..." "$arg"
+          if tar tzf "$GAMEDIR/backups/$arg" 2>/dev/null | \
+               awk '/^\// || /(^|\/)\.\.($|\/)/ {bad=1} END{exit bad}' &&
+             tar xzf "$GAMEDIR/backups/$arg" -C "$MCPE_SHARED_ROOT" profiles 2>/dev/null &&
+             { ! tar tzf "$GAMEDIR/backups/$arg" 2>/dev/null | grep -qx 'config/settings.cfg' ||
+               { mkdir -p "$GAMEDIR/config" &&
+                 tar xzf "$GAMEDIR/backups/$arg" -C "$GAMEDIR" config/settings.cfg 2>/dev/null; }; }; then
+            MCPE_MENU_STATUS="Backup restored"
+          else
+            MCPE_MENU_STATUS="Restore FAILED - see log.txt"
+          fi
+        fi
+        ;;
+      backup_delete)
+        if valid_plain_name "$arg" && [ -f "$GAMEDIR/backups/$arg" ]; then
+          rm -f "$GAMEDIR/backups/$arg"
+          MCPE_MENU_STATUS="Backup deleted"
+        fi
+        ;;
+      install_rgds)
+        echo "Menu: RGDS edition install chosen."
+        if [ -f "$GAMEDIR/update_port.sh" ]; then
+          updater_tmp="${TMPDIR:-/tmp}/minecraftbedrock-update-$$.sh"
+          cp -f "$GAMEDIR/update_port.sh" "$updater_tmp"
+          MCPE_UPDATE_TARGET_EDITION=minecraftbedrock.rgds \
+          MCPE_ENTRY_DIR="$PORTDIR" MCPE_GAMEDIR="$GAMEDIR" \
+            bash "$updater_tmp" || true
+          rm -f "$updater_tmp"
+        fi
+        exit 0
+        ;;
+      selftest)
+        # Answers "will this work here?" without installing an APK or starting
+        # the game, and leaves a redacted report to paste into a device report.
+        if [ -f "$GAMEDIR/selftest.sh" ]; then
+          SHOW_MSG_SLEEP=1 show_msg "Running the self test..."
+          if GAMEDIR="$GAMEDIR" bash "$GAMEDIR/selftest.sh" \
+               >"$GAMEDIR/logs/selftest-console.txt" 2>&1; then
+            MCPE_MENU_STATUS="Self test passed - see logs/selftest.txt"
+          else
+            MCPE_MENU_STATUS="Self test found problems - see logs/selftest.txt"
+          fi
+          SHOW_MSG_SLEEP=6 show_msg \
+            "$(tail -n 3 "$GAMEDIR/logs/selftest.txt" 2>/dev/null || echo 'Self test finished.')"
+        else
+          MCPE_MENU_STATUS="Self test helper is missing"
+        fi
+        ;;
+      support_bundle)
+        if [ -x "$GAMEDIR/create_support_bundle.sh" ]; then
+          bundle="$(GAMEDIR="$GAMEDIR" bash "$GAMEDIR/create_support_bundle.sh")"
+          MCPE_MENU_STATUS="Support bundle saved: $(basename "$bundle")"
+        else
+          MCPE_MENU_STATUS="Support bundle helper is missing"
+        fi
+        ;;
+      controller_test)
+        SHOW_MSG_SLEEP=1 show_msg "Controller test: press buttons and move both sticks for 8 seconds."
+        if python3 "$GAMEDIR/controller_diag.py" --seconds 8 >"$GAMEDIR/logs/controller-test.txt" 2>&1; then
+          MCPE_MENU_STATUS="Controller test saved to logs/controller-test.txt"
+        else
+          MCPE_MENU_STATUS="Controller test found no readable gamepad; see its log"
+        fi
+        ;;
+      update)
+        # Self-update. The updater overwrites this very script, which is
+        # safe only because this whole function was parsed before running:
+        # run the updater from a copy (its own file also gets overwritten;
+        # it protects itself the same way), then exit WITHOUT reading
+        # anything further from this file. The EXIT trap restores the
+        # frontend that the menu phase stopped.
+        echo "Menu: update chosen."
+        if [ -f "$GAMEDIR/update_port.sh" ]; then
+          updater_tmp="${TMPDIR:-/tmp}/minecraftbedrock-update-$$.sh"
+          cp -f "$GAMEDIR/update_port.sh" "$updater_tmp"
+          MCPE_ENTRY_DIR="$PORTDIR" MCPE_GAMEDIR="$GAMEDIR" \
+            bash "$updater_tmp" || true
+          rm -f "$updater_tmp"
+        else
+          show_msg "Updater missing (update_port.sh)." \
+                   "Re-install the port from the release zip."
+        fi
+        exit 0
+        ;;
+      exit)
+        echo "Menu: exit chosen."
+        exit 0
+        ;;
+      *)
+        [ -s "$CONFDIR/menu_error.txt" ] &&
+          { echo "menu error:"; cat "$CONFDIR/menu_error.txt"; }
+        echo "Menu unavailable (love exit $love_status) - using defaults."
+        return 1
+        ;;
+    esac
+  done
+}
+if [ -n "$MENU_LOVE_TXT" ]; then
+  mcpe_stage menu
+  if ! run_launcher_menu; then
+    {
+      printf 'launcher menu failed at %s\n' "$(date 2>/dev/null || true)"
+      [ -s "$CONFDIR/menu_error.txt" ] && cat "$CONFDIR/menu_error.txt"
+      tail -n 80 "$GAMEDIR/logs/launcher.log" 2>/dev/null || true
+    } >"$GAMEDIR/logs/menu-failure.log" 2>/dev/null || true
+    show_msg "Minecraft launcher menu failed." \
+             "Minecraft was NOT started with hidden defaults." \
+             "See logs/menu-failure.log or create a support bundle."
+    exit 2
+  fi
+elif [ "$MENU_WANTED" = 1 ]; then
+  echo "Launcher menu runtime unavailable; using legacy autoplay (set MCPE_MENU=1 to require the menu)."
+fi
+
+if [ "${MCPE_REDIRECT_RGDS:-0}" = 1 ]; then
+  show_msg "This is an RGDS dual-screen device." \
+           "Install 'Minecraft Bedrock RGDS' from the release page." \
+           "The lightweight standard edition will not start here."
+  exit 2
+fi
+
+# The menu can delete versions; re-check before launching.
+if ! has_installed_version; then
+  show_msg "No Minecraft version installed anymore." \
+           "Use Get APK from Google Play, or copy a Bedrock APK into" \
+           "ports/minecraftbedrock-data/apk/ and install it from the menu."
+  exit 1
+fi
+
+# --- Persisted settings (written by the menu's Settings screen) ------------------
+# Only whitelisted keys are consumed and every value is validated, so a
+# hand-edited settings.cfg cannot inject anything. Explicit env pins win over
+# the saved settings.
+SETTINGS_VERSION=""
+apply_settings() {
+  local f="$CONFDIR/settings.cfg" k v
+  [ -f "$f" ] || return 0
+  while IFS='=' read -r k v; do
+    case "$k" in
+      version)
+        v="${v//[!A-Za-z0-9._+ -]/}"
+        SETTINGS_VERSION="$v"
+        continue
+        ;;
+      ui_zoom)
+        # Carries a decimal point, so it is validated before the generic
+        # alphanumeric strip below would flatten "1.5" into "15".
+        v="${v//[!0-9.]/}"
+        case "$v" in
+          1.25|1.5) [ -z "${MCPE_UI_ZOOM:-}" ] && export MCPE_UI_ZOOM="$v" ;;
+        esac
+        continue
+        ;;
+    esac
+    v="${v//[!A-Za-z0-9]/}"
+    case "$k" in
+      fps_cap)
+        case "$v" in ''|0|*[!0-9]*) ;; *)
+          [ -z "${MCPE_MAX_FPS:-}" ] && export MCPE_MAX_FPS="$v" ;;
+        esac ;;
+      performance_fps_cap)
+        case "$v" in 30|40|50)
+          [ -z "${MCPE_PERF_FPS_CAP:-}" ] && export MCPE_PERF_FPS_CAP="$v" ;;
+        esac ;;
+      render_distance) # stored in chunks; the game option is in blocks
+        case "$v" in ''|0|*[!0-9]*) ;; *)
+          [ -z "${MCPE_RENDER_DISTANCE:-}" ] && export MCPE_RENDER_DISTANCE="$((v * 16))" ;;
+        esac ;;
+      abi)
+        case "$v" in arm64|armhf)
+          [ -z "${MCPE_ABI_OVERRIDE:-}" ] && export MCPE_ABI_OVERRIDE="$v" ;;
+        esac ;;
+      vsync)
+        case "$v" in 0|1)
+          [ -z "${MCPE_VSYNC:-}" ] && export MCPE_VSYNC="$v" ;;
+        esac ;;
+      network)
+        # auto = offline only for legacy builds the in-client guard cannot
+        # cover; on = keep LAN; off = always report offline.
+        case "$v" in auto|on|off)
+          [ -z "${MCPE_NETWORK_MODE:-}" ] && export MCPE_NETWORK_MODE="$v" ;;
+        esac ;;
+      safe_mode)
+        # Pins the failsafe ladder instead of letting it follow the launch
+        # history. safe_mode=0 is the way back to the tuned profile after the
+        # ladder has escalated.
+        case "$v" in 0|1|2|3)
+          [ -z "${MCPE_SAFE_MODE:-}" ] && export MCPE_SAFE_MODE="$v" ;;
+        esac ;;
+      perf_mode)
+        case "$v" in 0|1)
+          [ -z "${MCPE_PERFORMANCE_MODE:-}" ] && export MCPE_PERFORMANCE_MODE="$v" ;;
+        esac ;;
+      options_tuning)
+        case "$v" in 0|1)
+          [ -z "${MCPE_PERFORMANCE_OPTIONS:-}" ] && export MCPE_PERFORMANCE_OPTIONS="$v" ;;
+        esac ;;
+      measure_fps)
+        case "$v" in 0|1)
+          [ -z "${MCPE_MEASURE_FPS:-}" ] && export MCPE_MEASURE_FPS="$v" ;;
+        esac ;;
+      update_channel)
+        case "$v" in stable|testing)
+          printf '%s\n' "$v" >"$CONFDIR/update_channel" ;;
+        esac ;;
+    esac
+  done < "$f"
+}
+apply_settings
+
+set_seed_option() {
+  local options_file="$1" key="$2" value="$3"
+  if grep -q "^${key}:" "$options_file" 2>/dev/null; then
+    sed -i "s#^${key}:.*#${key}:${value}#" "$options_file"
+  else
+    echo "${key}:${value}" >>"$options_file"
+  fi
+}
+
+seed_116_options() {
+  local options_file default_options
+  options_file="$MCPE_DATA_ROOT_OVERRIDE/mcpelauncher/games/com.mojang/minecraftpe/options.txt"
+  [ ! -f "$options_file" ] || return
+
+  mkdir -p "$(dirname "$options_file")"
+  default_options="$GAMEDIR/profiles/default/mcpelauncher/games/com.mojang/minecraftpe/options.txt"
+  if [ -f "$default_options" ]; then
+    cp "$default_options" "$options_file"
+  else
+    : >"$options_file"
+  fi
+
+  set_seed_option "$options_file" gfx_vsync 0
+  set_seed_option "$options_file" gfx_msaa 1
+  set_seed_option "$options_file" gfx_fancyskies 0
+  set_seed_option "$options_file" gfx_toggleclouds 0
+  set_seed_option "$options_file" gfx_smoothlighting 0
+  set_seed_option "$options_file" gfx_transparentleaves 0
+}
+
+# Version precedence: custom/menu pin > remembered menu selection > registry recommendation.
+MCVER="${MCVER_OVERRIDE:-}"
+if [ -z "$MCVER" ] && [ -n "$SETTINGS_VERSION" ] &&
+   [ -d "$GAMEDIR/versions/$SETTINGS_VERSION" ]; then
+  if [ -f "$GAMEDIR/versions/$SETTINGS_VERSION/version.json" ] ||
+     ! compgen -G "$GAMEDIR/versions/*/version.json" >/dev/null; then
+    MCVER="$SETTINGS_VERSION"
+  else
+    echo "Ignoring remembered unverified version '$SETTINGS_VERSION'; a metadata-backed install is available."
+  fi
+fi
+MCVER="${MCVER:-$(latest_installed_version)}"
+export MCVER_OVERRIDE="$MCVER"
+# muOS's python3 writes a sitecustomize/usercustomize warning to stderr on
+# every single run while still exiting 0 (measured on Jacaranda 2601.0,
+# "OSError: [Errno 74] Bad message"). Folding stderr into the value handed to
+# eval turns that noise into shell commands, so keep the two streams apart and
+# read stderr only when the interpreter actually failed.
+VERSION_ENV_ERR="$GAMEDIR/logs/version_env.err"
+VERSION_ENV="$(python3 "$GAMEDIR/version_env.py" "$GAMEDIR" "$GAMEDIR/versions/$MCVER" 2>"$VERSION_ENV_ERR")" || {
+  echo "Version metadata validation failed: $(cat "$VERSION_ENV_ERR" 2>/dev/null)"
+  exit 1
+}
+eval "$VERSION_ENV"
+export MCPE_VERSION_METADATA MCPE_BEDROCK_VERSION_NAME MCPE_BEDROCK_VERSION_CODE
+export MCPE_BEDROCK_ABI_LABEL MCPE_COMPAT_STATUS MCPE_PROFILE_CLASS
+export MCPE_GAME_LIBRARY_SHA256 MCPE_RENDERER_PROFILE MCPE_RECOMMENDATION
+export MCPE_COMPAT_WARNING
+export MCPE_PATCH_EDUMODE MCPE_PATCH_HTTP_RESOLVE MCPE_COMPACTION_AVAILABLE
+mcpe_stage version
+mcpe_report_set bedrock "${MCPE_BEDROCK_VERSION_NAME:-$MCVER} code=${MCPE_BEDROCK_VERSION_CODE:-unknown} abi=${MCPE_BEDROCK_ABI_LABEL:-unknown}"
+mcpe_report_set bedrock_status "${MCPE_COMPAT_STATUS:-best_effort} renderer=${MCPE_RENDERER_PROFILE:-unclassified} recommendation=${MCPE_RECOMMENDATION:-none}"
+mcpe_report_set bedrock_library_sha256 "${MCPE_GAME_LIBRARY_SHA256:-unknown}"
+mcpe_report_set patches "edumode=${MCPE_PATCH_EDUMODE:-0} http_resolve=${MCPE_PATCH_HTTP_RESOLVE:-0} compaction_available=${MCPE_COMPACTION_AVAILABLE:-0}"
+
+# --- Startup network policy ---------------------------------------------------
+# Old builds initialise a broken cpprest/boost-asio stack at startup and exit
+# before the character menu when they believe the network is up; offline they
+# reach it every time (muOS report, 10 Jul). The in-client fix,
+# patchOldHttpResolveCrash, is compiled out on armhf and pinned to the arm64
+# 1.16.221.01 binary, so on every other legacy build there is nothing guarding
+# this at all. MCPE_FAKE_NO_NETWORK makes the game see no network and skip the
+# path entirely.
+#
+# LAN multiplayer is one of this port's better features, so this is only the
+# default where the crash is known and unguarded, and `network` in settings.cfg
+# overrides it in both directions.
+if [ -z "${MCPE_FAKE_NO_NETWORK:-}" ]; then
+  case "${MCPE_NETWORK_MODE:-auto}" in
+    off) export MCPE_FAKE_NO_NETWORK=1 ;;
+    on)  export MCPE_FAKE_NO_NETWORK=0 ;;
+    *)
+      if [ "${MCPE_PROFILE_CLASS:-default}" = legacy_1_16 ] &&
+         [ "${MCPE_PATCH_HTTP_RESOLVE:-0}" != 1 ]; then
+        export MCPE_FAKE_NO_NETWORK=1
+      else
+        export MCPE_FAKE_NO_NETWORK=0
+      fi
+      ;;
+  esac
+fi
+# Reported once the failsafe ladder has had its say below, since rung 1 and
+# above force offline regardless of this decision.
+if [ "${MCPE_COMPAT_STATUS:-best_effort}" = unsupported ]; then
+  echo "Selected Bedrock build is unsupported by the compatibility registry."
+  exit 1
+fi
+if [ -n "${MCPE_COMPAT_WARNING:-}" ]; then
+  echo "Compatibility warning: $MCPE_COMPAT_WARNING"
+fi
+if [ "${MCPE_DISABLE_AUTO_COMPACTION:-0}" = 1 ] &&
+   [ "${MCPE_COMPACTION_AVAILABLE:-0}" != 1 ]; then
+  echo "Auto-compaction patch requested but unavailable for this metadata; disabling it."
+  export MCPE_DISABLE_AUTO_COMPACTION=0
+fi
+if [ -z "${MCPE_DATA_ROOT_OVERRIDE:-}" ] && [ "${MCPE_PROFILE_CLASS:-default}" = legacy_1_16 ]; then
+  export MCPE_DATA_ROOT_OVERRIDE="$GAMEDIR/profiles/$MCVER"
+  # Architecture-specific defaults are applied after run_bedrock.sh selects
+  # the usable client.  In particular, do not pre-fill the 64-bit defaults
+  # here and accidentally suppress the low-memory R36S/armhf preset.
+  seed_116_options
+else
+  export MCPE_DATA_ROOT_OVERRIDE="${MCPE_DATA_ROOT_OVERRIDE:-$GAMEDIR/profiles/default}"
+fi
+mkdir -p "$MCPE_DATA_ROOT_OVERRIDE"
+
+# --- Failsafe ladder ----------------------------------------------------------
+# Decided here, after the version is known and after apply_settings, because a
+# rung above 0 has to win over the saved profile that just failed to start.
+mcpe_failsafe_plan
+mcpe_failsafe_apply
+mcpe_report_set failsafe "rung=${MCPE_FAILSAFE_RUNG:-0} (${MCPE_FAILSAFE_RUNG_NAME:-tuned}) floor=${MCPE_FAILSAFE_FLOOR:-0} pinned=${MCPE_FAILSAFE_PINNED:-0}"
+mcpe_report_set failsafe_reason "${MCPE_FAILSAFE_REASON:-no change}"
+echo "Failsafe: rung ${MCPE_FAILSAFE_RUNG:-0} (${MCPE_FAILSAFE_RUNG_NAME:-tuned}) - $(mcpe_failsafe_describe)"
+echo "Failsafe reason: ${MCPE_FAILSAFE_REASON:-no change}"
+
+if [ "${MCPE_FAKE_NO_NETWORK:-0}" = 1 ]; then
+  echo "Network: reporting offline to the game (mode=${MCPE_NETWORK_MODE:-auto}; in-client guard=${MCPE_PATCH_HTTP_RESOLVE:-0}). LAN will not work."
+  echo "         Set network=on in config/settings.cfg to keep LAN and accept the startup risk."
+else
+  echo "Network: normal (mode=${MCPE_NETWORK_MODE:-auto}; in-client guard=${MCPE_PATCH_HTTP_RESOLVE:-0})"
+fi
+mcpe_report_set network "mode=${MCPE_NETWORK_MODE:-auto} offline=${MCPE_FAKE_NO_NETWORK:-0} guarded=${MCPE_PATCH_HTTP_RESOLVE:-0}"
+
+if [ "${MCPE_FAILSAFE_RUNG:-0}" -ge 1 ]; then
+  # Never degrade silently: a player who is handed 20 fps and no sound must be
+  # told why, and how to overrule it.
+  show_msg "Safe mode ${MCPE_FAILSAFE_RUNG}: $(mcpe_failsafe_describe)" \
+           "Reason: ${MCPE_FAILSAFE_REASON:-previous launch did not finish}" \
+           "It returns to normal by itself after two good launches." \
+           "To force normal: set safe_mode=0 in config/settings.cfg."
+fi
+
+MCPE_LAUNCH_SECONDS=0
+if [ "${MCPE_FAILSAFE_RUNG:-0}" -ge 3 ]; then
+  # Terminal rung: relaunching into the same failure teaches nobody anything,
+  # so collect the report instead. This still falls through to the shared
+  # cleanup below -- skipping pm_finish here would strand the CFW frontend.
+  echo "Every launch profile down to the minimal one failed to start on this device."
+  bundle="$(bash "$GAMEDIR/create_support_bundle.sh" 2>/dev/null || true)"
+  [ -n "$bundle" ] && echo "Support bundle: $bundle"
+  show_msg "Minecraft did not start at any safe-mode level." \
+           "Minecraft was NOT started this time; a report was collected instead." \
+           "${bundle:-Run create_support_bundle.sh in the minecraftbedrock folder.}" \
+           "Attach it to a device report, then set safe_mode=0 to try again."
+  status=3
+  mcpe_report_set exit_status "diagnostic; the game was not started"
+else
+  MCPE_LAUNCH_STARTED_MS="$(mcpe_now_ms)"
+  bash "$GAMEDIR/run_bedrock.sh"
+  status=$?
+  MCPE_LAUNCH_SECONDS=$(( ($(mcpe_now_ms) - MCPE_LAUNCH_STARTED_MS) / 1000 ))
+  mcpe_failsafe_record "$status" "$MCPE_LAUNCH_SECONDS"
+  mcpe_report_set exit_status "$status after ${MCPE_LAUNCH_SECONDS}s (${MCPE_FAILSAFE_OUTCOME:-unknown})"
+  mcpe_report_set failsafe_next "rung ${MCPE_FAILSAFE_NEXT_RUNG:-${MCPE_FAILSAFE_RUNG:-0}} on the next launch"
+fi
+
+mcpe_stage shutdown
+mcpe_report_print
+
+[ "$status" -eq 0 ] && mcpe_mark_migration_success
+
+if command -v pm_finish >/dev/null 2>&1; then
+  pm_finish || true
+fi
+
+# Reached only on an orderly return from the launch path. Any other outcome
+# leaves the breadcrumb on the stage that was still in progress.
+mcpe_stage done
+
+exit "$status"

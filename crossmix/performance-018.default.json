@@ -1,0 +1,5 @@
+{
+  "profile": "NO_PARTICLES",
+  "particles_method": "assets",
+  "texture_dequeue": 4
+}

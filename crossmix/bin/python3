@@ -1,0 +1,22 @@
+#!/bin/sh
+# CrossMix's updater extracts the complete Python runtime to System.
+set -eu
+candidate="${MCPE_CARD_ROOT:?}/System/bin/python3.11"
+if [ -x "$candidate" ]; then
+    if [ ! -r "$MCPE_CARD_ROOT/System/lib/python3.11/encodings/__init__.py" ]; then
+        echo 'CrossMix Python standard library missing: System/lib/python3.11/encodings/__init__.py' >&2
+        exit 126
+    fi
+    export PYTHONHOME="$MCPE_CARD_ROOT/System"
+    echo "python_executable=$candidate PYTHONHOME=$PYTHONHOME" >&2
+    exec "$candidate" "$@"
+fi
+for candidate in /usr/bin/python3 /bin/python3; do
+    if [ -x "$candidate" ]; then
+        unset PYTHONHOME
+        echo "python_executable=$candidate (firmware fallback)" >&2
+        exec "$candidate" "$@"
+    fi
+done
+echo 'Python 3 not found in CrossMix.' >&2
+exit 127

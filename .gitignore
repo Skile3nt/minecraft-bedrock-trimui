@@ -1,0 +1,47 @@
+# Never commit user-supplied or extracted Minecraft game files here.
+*.apk
+*.apks
+*.apkm
+*.xapk
+*.zip
+**/libminecraftpe.so
+**/com.mojang/
+**/versions/
+**/profiles/
+**/level.dat
+**/level.dat_old
+**/*.mcworld
+
+# Local testing noise.
+*.log
+*.csv
+__pycache__/
+*.pyc
+
+# Host-test executables are generated from the checked-in C sources.
+/bottomscreen/bottomd/bottomd
+/bottomscreen/bottomd/test_daynight
+/bottomscreen/bottomd/test_worldinfo
+/bottomscreen/telemetry/telemetry_dump
+/bottomscreen/telemetry/test_downscale
+/bottomscreen/telemetry/test_feed
+/bottomscreen/telemetry/test_mirror
+
+# Local working directories: scratch, build output, release staging, and
+# session logs. Keep only the pinned container recipes needed by clean CI
+# checkouts; every other build artifact remains local-only.
+/build/*
+!/build/clients/
+!/build/companions/
+/build/clients/*
+!/build/clients/Dockerfile
+!/build/clients/Dockerfile.armhf-buster
+!/build/clients/build-in-container.sh
+/build/companions/*
+!/build/companions/Dockerfile
+/dist/
+/recovery/
+# Google Play session files must never enter the repository.
+playdl.conf
+playdl.conf.*
+token_cache.conf

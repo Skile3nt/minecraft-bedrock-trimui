@@ -1,0 +1,129 @@
+[
+  {
+    "Package": "libasound2",
+    "Version": "1.2.8-1+b1",
+    "Filename": "pool/main/a/alsa-lib/libasound2_1.2.8-1+b1_arm64.deb",
+    "SHA256": "9fa889400fcee4b92c8f4a2fafbb7f2cd33444d9ec1665a71002ab67c06114bb",
+    "Size": "327044"
+  },
+  {
+    "Package": "libasound2-data",
+    "Version": "1.2.8-1",
+    "Filename": "pool/main/a/alsa-lib/libasound2-data_1.2.8-1_all.deb",
+    "SHA256": "fe0780d2d3674b2977e0acb0d48b448ad72ba1642564b7dc537f55e839984c2d",
+    "Size": "20488"
+  },
+  {
+    "Package": "libgcc-s1",
+    "Version": "12.2.0-14+deb12u1",
+    "Filename": "pool/main/g/gcc-12/libgcc-s1_12.2.0-14+deb12u1_arm64.deb",
+    "SHA256": "576926b283613db80168ddf76380a3bd877602778cf0d226caa7bfbfa71eacf3",
+    "Size": "34816"
+  },
+  {
+    "Package": "libstdc++6",
+    "Version": "12.2.0-14+deb12u1",
+    "Filename": "pool/main/g/gcc-12/libstdc++6_12.2.0-14+deb12u1_arm64.deb",
+    "SHA256": "26e138c677a985775331373828a6c286c551ff397cb735d00e2383cb273d1cb2",
+    "Size": "556608"
+  },
+  {
+    "Package": "libc6",
+    "Version": "2.36-9+deb12u14",
+    "Filename": "pool/main/g/glibc/libc6_2.36-9+deb12u14_arm64.deb",
+    "SHA256": "01f4330719fd4f65580e16ea5a0527f372fca750e8f588d26deaf09f2d3b1cf4",
+    "Size": "2324660"
+  },
+  {
+    "Package": "libevdev2",
+    "Version": "1.13.0+dfsg-1",
+    "Filename": "pool/main/libe/libevdev/libevdev2_1.13.0+dfsg-1_arm64.deb",
+    "SHA256": "919602fab060d571d938d4aed6e3d5dd4a6f04afcd2eb8dfdc4daeb0bfba32d7",
+    "Size": "32004"
+  },
+  {
+    "Package": "libwayland-egl1",
+    "Version": "1.21.0-1",
+    "Filename": "pool/main/w/wayland/libwayland-egl1_1.21.0-1_arm64.deb",
+    "SHA256": "c08124a4d9af24f058b45c88867a84697882e755ea94965795d152fe26fe57c9",
+    "Size": "8696"
+  },
+  {
+    "Package": "zlib1g",
+    "Version": "1:1.2.13.dfsg-1",
+    "Filename": "pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb",
+    "SHA256": "52b8b8a145bbe1956bba82034f77022cbef0c3d0885c9e32d9817a7932fe1913",
+    "Size": "82744"
+  },
+  {
+    "Package": "libgl1",
+    "Version": "1.6.0-1",
+    "Filename": "pool/main/libg/libglvnd/libgl1_1.6.0-1_arm64.deb",
+    "SHA256": "f4043ab47f52325973d2b608514b3469b055b65c744861c7f378755a32e799d6",
+    "Size": "90232"
+  },
+  {
+    "Package": "libglvnd0",
+    "Version": "1.6.0-1",
+    "Filename": "pool/main/libg/libglvnd/libglvnd0_1.6.0-1_arm64.deb",
+    "SHA256": "d5063205fab5322ee686f33f87c6315b3fcd1335ea4e7bc8202b48ed4f9c9e83",
+    "Size": "41396"
+  },
+  {
+    "Package": "libglx0",
+    "Version": "1.6.0-1",
+    "Filename": "pool/main/libg/libglvnd/libglx0_1.6.0-1_arm64.deb",
+    "SHA256": "523f9b71f75e48ae605d8ef298a4b03ade26ade9a808a85329a3bd82a54b9b0d",
+    "Size": "30848"
+  },
+  {
+    "Package": "libgbm1",
+    "Version": "22.3.6-1+deb12u2",
+    "Filename": "pool/main/m/mesa/libgbm1_22.3.6-1+deb12u2_arm64.deb",
+    "SHA256": "f5c8fdddbf365259d74af270fb10f30d7fddb3fbe7b2ff62f0fdd556f8db0dc8",
+    "Size": "37104"
+  },
+  {
+    "Package": "libbz2-1.0",
+    "Version": "1.0.8-5+b1",
+    "Filename": "pool/main/b/bzip2/libbz2-1.0_1.0.8-5+b1_arm64.deb",
+    "SHA256": "d3a96ece03326498b39ff093a76800dfcbcb1d4049d6ae6e9f6fa1aa7a590ad6",
+    "Size": "47452"
+  },
+  {
+    "Package": "libexpat1",
+    "Version": "2.5.0-1+deb12u2",
+    "Filename": "pool/main/e/expat/libexpat1_2.5.0-1+deb12u2_arm64.deb",
+    "SHA256": "8dc1976735acf825e3a922d82f171e20feec7394da2b8c616091983e38706275",
+    "Size": "86280"
+  },
+  {
+    "Package": "libuuid1",
+    "Version": "2.38.1-5+deb12u3",
+    "Filename": "pool/main/u/util-linux/libuuid1_2.38.1-5+deb12u3_arm64.deb",
+    "SHA256": "3b2d19df0f3190108cf54228c4cfc822226c06d8f3615a5ab16a7dffb1f58aed",
+    "Size": "28532"
+  },
+  {
+    "Package": "libjpeg-turbo8",
+    "Version": "2.1.2-0ubuntu1",
+    "Filename": "pool/main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.2-0ubuntu1_arm64.deb",
+    "SHA256": "1c47447261097e6a2105f4ae6f0bf2c7b1e8c6b8209c8ea40286c69c20f43818",
+    "Size": "129240",
+    "URL": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.2-0ubuntu1_arm64.deb"
+  },
+  {
+    "Package": "bash",
+    "Version": "5.2.15-2+b13",
+    "Filename": "pool/main/b/bash/bash_5.2.15-2+b13_arm64.deb",
+    "SHA256": "fdb470b5ec1773b90014138bfc1deda4505c1c23e7f5731e8b527c636ac03385",
+    "Size": "1444200"
+  },
+  {
+    "Package": "libtinfo6",
+    "Version": "6.4-4",
+    "Filename": "pool/main/n/ncurses/libtinfo6_6.4-4_arm64.deb",
+    "SHA256": "baef0f6776f84c7eed4f1146d6e5774689567dad43216894d41da02e6608e4b3",
+    "Size": "324548"
+  }
+]

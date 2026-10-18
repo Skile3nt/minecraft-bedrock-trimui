@@ -1,0 +1,16 @@
+[
+  {
+    "Package": "libegl1",
+    "Version": "1.6.0-1",
+    "Filename": "pool/main/libg/libglvnd/libegl1_1.6.0-1_arm64.deb",
+    "SHA256": "707097a275155c600e2e9251c4ee7cdfdb2d8f50a678a850a2526a7bc9664166",
+    "Size": "33104"
+  },
+  {
+    "Package": "libgles2",
+    "Version": "1.6.0-1",
+    "Filename": "pool/main/libg/libglvnd/libgles2_1.6.0-1_arm64.deb",
+    "SHA256": "efeb2717380f8411d66b3f669bb99bbd83ff09db3d4a1661533aa31af659608c",
+    "Size": "17524"
+  }
+]

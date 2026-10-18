@@ -1,0 +1,10 @@
+#!/bin/sh
+# CrossMix's /bin/bash may be BusyBox. Never replace firmware files.
+set -eu
+runtime="${GAMEDIR:?}/crossmix/runtime/debian"
+# Keep the firmware environment for external commands (Python, LOVE, utilities).
+# --library-path affects this private Bash process only.
+unset LD_PRELOAD
+exec "$runtime/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" --inhibit-cache \
+    --library-path "$runtime/lib/aarch64-linux-gnu:$runtime/usr/lib/aarch64-linux-gnu" \
+    "$runtime/bin/bash" "$@"

@@ -1,0 +1,212 @@
+name: compatibility-and-release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        default: testing
+        type: choice
+        options: [testing, stable]
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck gcc make libpng-dev
+      - run: find portmaster/minecraftbedrock bottomscreen/release scripts tests tools/mcbedrock-get tools/ondevice-downloader -name '*.sh' -type f -print0 | xargs -0 shellcheck -S error
+      - run: bash tests/run_all.sh
+
+  compatibility-docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/generate_compat_docs.py --check
+
+  clients:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            edition: standard
+          - arch: armhf
+            edition: standard
+          - arch: aarch64
+            edition: rgds
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned client build
+        run: |
+          mkdir -p build/container-output
+          docker build --file build/clients/Dockerfile \
+            --build-arg TARGET_ARCH=${{ matrix.arch }} \
+            --build-arg EDITION=${{ matrix.edition }} \
+            --output type=local,dest=build/container-output .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-${{ matrix.arch }}-${{ matrix.edition }}
+          path: build/container-output/mcpelauncher-client.${{ matrix.arch }}.${{ matrix.edition }}
+          if-no-files-found: error
+
+  companions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir -p build/container-output
+          docker build --file build/companions/Dockerfile \
+            --output type=local,dest=build/container-output .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rgds-companions
+          path: |
+            build/container-output/bottomd
+            build/container-output/bedrockmap
+            build/container-output/crusty-context-v1.so
+          if-no-files-found: error
+
+  linux-helper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Helper unit tests
+        working-directory: tools/mcbedrock-get
+        run: python3 -m unittest discover -s tests -p "test_*.py" -t .
+      - name: Build the AppImage
+        working-directory: tools/mcbedrock-get
+        run: bash build-appimage.sh "$GITHUB_WORKSPACE/dist-linux"
+      - name: Smoke-test the AppImage
+        run: |
+          set -euo pipefail
+          APP=$(ls "$GITHUB_WORKSPACE"/dist-linux/*.AppImage)
+          chmod +x "$APP"
+          # No FUSE on the runner, so run it the way a FUSE-less machine would.
+          # No `| head`: closing the pipe early is a separate thing to test,
+          # and it would mask whether the catalog itself came through.
+          out=$("$APP" --appimage-extract-and-run --list --abi arm64)
+          echo "$out" | head -3
+          echo "$out" | grep -q "1.16.221.01" || {
+            echo "the bundled catalog did not list the recommended build" >&2
+            exit 1
+          }
+      - name: A closed pipe must not produce a traceback
+        run: |
+          set -uo pipefail
+          APP=$(ls "$GITHUB_WORKSPACE"/dist-linux/*.AppImage)
+          err=$("$APP" --appimage-extract-and-run --list 2>&1 >/dev/null | head -5 || true)
+          if echo "$err" | grep -q "BrokenPipeError"; then
+            echo "piping --list into head still crashes" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-helper
+          path: dist-linux/*.AppImage
+          if-no-files-found: error
+
+  windows-helper:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tools/mcbedrock-get/requirements.txt
+      - name: Helper unit tests
+        working-directory: tools/mcbedrock-get
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Build Windows bundle twice and compare
+        working-directory: tools/mcbedrock-get
+        shell: pwsh
+        run: |
+          cmd /d /c build.bat
+          if ($LASTEXITCODE -ne 0) { throw "First Windows helper build failed" }
+          $firstExe = (Get-FileHash .\dist\mcbedrock-get.exe -Algorithm SHA256).Hash
+          $firstBundle = (Get-FileHash .\dist\mcbedrock-get-windows-v*.zip -Algorithm SHA256).Hash
+
+          cmd /d /c build.bat
+          if ($LASTEXITCODE -ne 0) { throw "Second Windows helper build failed" }
+          $secondExe = (Get-FileHash .\dist\mcbedrock-get.exe -Algorithm SHA256).Hash
+          $secondBundle = (Get-FileHash .\dist\mcbedrock-get-windows-v*.zip -Algorithm SHA256).Hash
+
+          if ($firstExe -ne $secondExe) { throw "Windows helper executable is not reproducible" }
+          if ($firstBundle -ne $secondBundle) { throw "Windows helper bundle is not reproducible" }
+      - name: Smoke-test executable
+        working-directory: tools/mcbedrock-get
+        run: |
+          $help = & .\dist\mcbedrock-get.exe --help
+          if ($LASTEXITCODE -ne 0 -or ($help -join "`n") -notmatch "--logout") {
+            throw "Windows helper CLI smoke test failed"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-helper
+          path: tools/mcbedrock-get/dist/mcbedrock-get-windows-v*.zip
+          if-no-files-found: error
+
+  reproducibility:
+    needs: [host-tests, compatibility-docs, clients, companions, windows-helper, linux-helper]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: client-*
+          path: build/release-inputs
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: rgds-companions
+          path: build/release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-helper
+          path: build/release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-helper
+          path: build/release-inputs
+      - name: Assemble twice and compare
+        env:
+          CHANNEL: ${{ inputs.channel || 'testing' }}
+        run: |
+          VERSION=$(cat VERSION)
+          # A stable release has to become the testing channel's newest build
+          # too, or everyone on testing sits on the last release candidate for
+          # ever. Never the reverse: stable must not be pointed at a testing
+          # build.
+          MIRROR=""
+          if [ "$CHANNEL" = stable ]; then MIRROR="--mirror-channel testing"; fi
+          COMMON_ARGS="--version $VERSION --channel $CHANNEL $MIRROR \
+            --standard-arm64-client build/release-inputs/mcpelauncher-client.aarch64.standard \
+            --standard-armhf-client build/release-inputs/mcpelauncher-client.armhf.standard \
+            --rgds-client build/release-inputs/mcpelauncher-client.aarch64.rgds \
+            --bottomd build/release-inputs/bottomd \
+            --bedrockmap build/release-inputs/bedrockmap \
+            --context-bridge build/release-inputs/crusty-context-v1.so \
+            --extra-asset build/release-inputs/mcbedrock-get-windows-v$VERSION.zip \
+            --extra-asset build/release-inputs/mcbedrock-get-linux-x86_64-v$VERSION.AppImage"
+          python3 scripts/build_releases.py $COMMON_ARGS --out-dir dist/release
+          python3 scripts/build_releases.py $COMMON_ARGS --out-dir dist/release-repeat
+          diff -qr dist/release dist/release-repeat
+          python3 scripts/check_release_safety.py \
+            --zip dist/release/minecraftbedrock-standard-v$VERSION.zip \
+            --zip dist/release/minecraftbedrock-rgds-v$VERSION.zip \
+            --zip dist/release/minecraftbedrock-source-v$VERSION.zip \
+            --zip dist/release/mcbedrock-get-windows-v$VERSION.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minecraftbedrock-release
+          path: dist/release/*
+          if-no-files-found: error

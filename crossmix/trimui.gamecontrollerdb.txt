@@ -1,0 +1,5 @@
+# Built-in pad: /proc input 0003:045e:028e:0114, ABS=3003f.
+# CrossMix PortMaster's detected SDL mapping uses triggers a2/a5 for this ID.
+# Keep all previously generated Minecraft bindings; only add the missing axes.
+# Physical label confirmation and Minecraft binding remain a hardware test.
+030000005e0400008e02000014010000,TRIMUI Player1,b:b0,a:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,back:b6,start:b7,guide:b8,leftstick:b9,rightstick:b10,leftx:a0,lefty:a1,rightx:a3,righty:a4,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,lefttrigger:a2,righttrigger:a5,

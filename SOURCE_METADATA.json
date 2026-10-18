@@ -1,0 +1,9 @@
+{
+  "archive_type": "source-only-not-installable",
+  "source_files_kept": 480,
+  "excluded_files": 115,
+  "includes_game_apks": false,
+  "includes_worlds": false,
+  "minecraft_commercial_assets": false,
+  "skile_skin_pack_optional": true
+}

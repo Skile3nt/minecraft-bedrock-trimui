@@ -1,0 +1,141 @@
+diff --git a/src/joystick_manager_linux_gamepad.cpp b/src/joystick_manager_linux_gamepad.cpp
+index 0c59a90..993dfa8 100644
+--- a/src/joystick_manager_linux_gamepad.cpp
++++ b/src/joystick_manager_linux_gamepad.cpp
+@@ -1,5 +1,7 @@
+ #include "joystick_manager_linux_gamepad.h"
+ 
++#include <cstdlib>
++#include <cstring>
+ #include <fstream>
+ #include <gamepad/joystick_manager_factory.h>
+ #include <gamepad/joystick.h>
+@@ -132,11 +134,19 @@ void LinuxGamepadJoystickManager::warnOnMissingGamePadMapping(gamepad::Gamepad*
+ }
+ 
+ void LinuxGamepadJoystickManager::onGamepadButton(gamepad::Gamepad* gp, gamepad::GamepadButton btn, bool state) {
++    const char* trace = std::getenv("GAMEWINDOW_GAMEPAD_TRACE");
++    if (trace && strcmp(trace, "0") != 0)
++        fprintf(stderr, "GAMEPAD_MAPPED button=%d state=%d focused=%d\n",
++                (int)btn, state, focusedWindow != nullptr);
+     if (focusedWindow != nullptr)
+         focusedWindow->onGamepadButton(gp->getIndex(), mapButtonId(btn), state);
+ }
+ 
+ void LinuxGamepadJoystickManager::onGamepadAxis(gamepad::Gamepad* gp, gamepad::GamepadAxis axis, float value) {
++    const char* trace = std::getenv("GAMEWINDOW_GAMEPAD_TRACE");
++    if (trace && strcmp(trace, "0") != 0 && (value > 0.2f || value < -0.2f))
++        fprintf(stderr, "GAMEPAD_MAPPED axis=%d value=%f focused=%d\n",
++                (int)axis, value, focusedWindow != nullptr);
+     if (focusedWindow != nullptr)
+         focusedWindow->onGamepadAxis(gp->getIndex(), mapAxisId(axis), value);
+ }
+diff --git a/src/window_sdl3.cpp b/src/window_sdl3.cpp
+--- a/src/window_sdl3.cpp
++++ b/src/window_sdl3.cpp
+@@ -1,2 +1,3 @@
++#include <cstdlib>
+ #include "window_sdl3.h"
+ #include "game_window_manager.h"
+@@ -24,7 +25,11 @@ SDL3GameWindow::SDL3GameWindow(const std::string& title, int width, int height,
+     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+-    window = SDL_CreateWindow(title.data(), width, height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
++    SDL_WindowFlags windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
++    // A compositor-side fullscreen command arrives after the first frame.  Let
++    // handheld launchers request fullscreen as part of initial window creation.
++    if(std::getenv("GAMEWINDOW_SDL_FULLSCREEN"))
++        windowFlags |= SDL_WINDOW_FULLSCREEN;
++    window = SDL_CreateWindow(title.data(), width, height, windowFlags);
+     if(window == nullptr) {
+         // Throw an exception, otherwise it would crash due to a nullptr without any information
+         const char* error = SDL_GetError();
+@@ -247,12 +247,18 @@ void SDL3GameWindow::pollEvents() {
+         case SDL_EVENT_GAMEPAD_BUTTON_UP:
+             onGamepadButton(ev.gbutton.which, getKeyGamePad(ev.gbutton.button), ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+             break;
+         case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+-            onGamepadAxis(ev.gbutton.which, getAxisGamepad(ev.gbutton.button), ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
++            onGamepadAxis(ev.gaxis.which, getAxisGamepad(ev.gaxis.axis),
++                          (float)ev.gaxis.value / 32767.0f);
+             break;
+         case SDL_EVENT_GAMEPAD_ADDED:
+-        case SDL_EVENT_GAMEPAD_REMOVED:
++        case SDL_EVENT_GAMEPAD_REMOVED: {
++            if(ev.type == SDL_EVENT_GAMEPAD_ADDED)
++                SDL_OpenGamepad(ev.gdevice.which);
+             onGamepadState(ev.gdevice.which, ev.type == SDL_EVENT_GAMEPAD_ADDED);
++            if(ev.type == SDL_EVENT_GAMEPAD_REMOVED)
++                SDL_CloseGamepad(SDL_GetGamepadFromID(ev.gdevice.which));
++            break;
++        }
+-            break;
+         case SDL_EVENT_WINDOW_RESIZED:
+             setRelativeScale();
+diff --git a/src/window_eglut.cpp b/src/window_eglut.cpp
+index 138dff1..c68161a 100644
+--- a/src/window_eglut.cpp
++++ b/src/window_eglut.cpp
+@@ -3,6 +3,10 @@
+ #include <game_window_manager.h>
+ 
+ #include <cstring>
++#include <cstdio>
++#include <cstdlib>
++#include <cstdint>
++#include <dlfcn.h>
+ #include <sstream>
+ #include <eglut.h>
+ #define XK_MISCELLANY
+@@ -62,6 +66,32 @@ void EGLUTWindow::setIcon(std::string const &iconPath) {
+ }
+ 
+ void EGLUTWindow::makeCurrent(bool active) {
++    const char* crustyBridgeEnv = std::getenv("GAMEWINDOW_EGLUT_CRUSTY_CONTEXT");
++    if (crustyBridgeEnv && *crustyBridgeEnv && strcmp(crustyBridgeEnv, "0") != 0) {
++        // The matching runtime bridge records Crusty's SDL handles through
++        // normal symbol interposition and exposes this stable API. No private
++        // data address from a particular Westonpack build is read here.
++        using ContextApiV1 = int (*)(unsigned int, int);
++        static auto contextApi = reinterpret_cast<ContextApiV1>(
++            dlsym(RTLD_DEFAULT, "crusty_gamewindow_context_v1"));
++        if (contextApi) {
++            int result = contextApi(1U, active ? 1 : 0);
++            if (result == 0)
++                return;
++            fprintf(stderr, "EGLUT crusty context API v1 unavailable: %d; "
++                            "using native EGL context path\n", result);
++        }
++        // No crusty bridge in this process (for example a Panfrost bypass):
++        // continue through the native EGL path. The launcher validates that
++        // the bridge module exists before enabling a Crusty backend.
++        static bool warned = false;
++        if (!warned) {
++            fprintf(stderr, "EGLUT crusty context API v1 unavailable; "
++                            "using native EGL context path\n");
++            warned = true;
++        }
++    }
++
+ #ifdef GAMEWINDOW_X11_LOCK
+     std::lock_guard<std::recursive_mutex> lock(x11_sync);
+ #endif
+@@ -75,6 +105,8 @@ void EGLUTWindow::show() {
+     eglutShowWindow();
+     currentWindow = this;
+     addWindowToGamepadManager();
++    if (std::getenv("GAMEWINDOW_EGLUT_FORCE_FOCUS"))
++        LinuxGamepadJoystickManager::instance.onWindowFocused(this, true);
+ }
+ 
+ void EGLUTWindow::close() {
+@@ -141,6 +173,8 @@ void EGLUTWindow::setSwapInterval(int interval) {
+ void EGLUTWindow::_eglutIdleFunc() {
+     if (currentWindow == nullptr)
+         return;
++    if (std::getenv("GAMEWINDOW_EGLUT_FORCE_FOCUS"))
++        LinuxGamepadJoystickManager::instance.onWindowFocused(currentWindow, true);
+     currentWindow->updateGamepad();
+     eglutPostRedisplay();
+ }

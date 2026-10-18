@@ -1,0 +1,105 @@
+name: Bug report
+description: Report a crash, launch failure, install problem, or gameplay issue.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach Minecraft APKs, extracted game files, worlds, `versions/`, `profiles/`, or `libminecraftpe.so`.
+
+        **Before filling this in, run the self test.** In the launcher menu choose
+        **Self test**, or over SSH run `bash selftest.sh` in the `minecraftbedrock`
+        folder. It does not start Minecraft and does not need an APK installed. It
+        writes a redacted report to `minecraftbedrock/logs/selftest.txt` that
+        answers most of the questions below on its own.
+  - type: dropdown
+    id: cfw
+    attributes:
+      label: Firmware
+      description: |
+        Knulli, ROCKNIX and muOS have reference devices this port was tested on.
+        The ArkOS family does not — it is out of scope for v2.0.0 and its code
+        paths are unverified — so reports from those devices are the most useful
+        ones anybody can send.
+      options:
+        - Knulli
+        - muOS
+        - ROCKNIX
+        - dArkOS / DarkOS RE / ArkOS
+        - Batocera
+        - Other or not sure
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: "Example: Anbernic RG34XX-SP"
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      placeholder: "Example: Knulli 20260511, ROCKNIX 20260710, muOS Jacaranda"
+    validations:
+      required: true
+  - type: input
+    id: minecraft-version
+    attributes:
+      label: Minecraft APK version
+      description: Leave blank if nothing is installed yet.
+      placeholder: "Example: 1.16.221.01 arm64"
+  - type: textarea
+    id: issue
+    attributes:
+      label: What happened?
+      description: Describe the behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Self test output
+      description: |
+        Paste `minecraftbedrock/logs/selftest.txt`, or the output of
+        `bash selftest.sh`. It is already redacted. If the port will not start
+        far enough to run it, say so here and fill in the rest.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: How far did it get?
+      description: |
+        If you do not know, look at the last line of
+        `minecraftbedrock/logs/stage.txt`, or at `stage.prev.txt` if the device
+        froze and you had to power it off.
+      options:
+        - The launcher menu never appeared
+        - The menu worked, the game never started
+        - The game started and then hung or crashed before the main menu
+        - The game reached the main menu or gameplay, then failed
+        - It runs, but something is wrong (sound, controls, performance)
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log text
+      description: |
+        Paste relevant lines from `minecraftbedrock/log.txt` or
+        `minecraftbedrock/weston_launch.log`. If the device froze during a
+        launch, `minecraftbedrock/logs/hang-report.txt` is the useful one.
+        Redact private details.
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-file check
+      options:
+        - label: I did not attach APKs, extracted game files, worlds, or private profile data.
+          required: true
